@@ -303,6 +303,17 @@ worth knowing:
   exited non-zero. The agent is told what the budget was and whether asking for more is available,
   so it does not read a timeout as a broken command and retry it unchanged.
 
+**Working directory (`cwd`).** `run_shell_command` takes an optional `cwd` argument so the agent
+can run commands in a specific subdirectory (such as a workspace package) without composing
+`cd <dir> && <cmd>`. A relative path resolves against the session working directory, and all paths
+are realpath-resolved. A directory that does not exist or is not a directory is refused immediately
+without running anything. Inside the project, existing grants for the command apply across any
+subdirectory. An out-of-project directory (including `..` traversal, external absolute paths, or
+symlinks pointing outside) always requires confirmation at `manual`, `write`, `assisted`, and `auto`
+rungs, even if a matching grant exists; only `bypass` runs without prompting. Unlike `timeoutMs`,
+the fixed `run_*` commands do not accept `cwd` because they are configured statically at the
+project root.
+
 **Who may run a command is configured separately**, in the top-level [`approvals`](#approvals)
 setting — not here.
 

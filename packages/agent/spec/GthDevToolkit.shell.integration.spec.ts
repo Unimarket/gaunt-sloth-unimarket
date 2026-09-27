@@ -52,6 +52,22 @@ d('GthDevToolkit shell hardening (real spawn)', () => {
     ).executeCommand(command, 'run_shell_command', undefined, timeoutMs);
   };
 
+  /** EXT-199: the same, with a per-call cwd attached to THIS invocation. */
+  const runWithCwd = (command: string, commands: object, cwd: string) => {
+    const toolkit = new GthDevToolkit(commands);
+    return (
+      toolkit as unknown as {
+        executeCommand(
+          _c: string,
+          _n: string,
+          _id?: string,
+          _t?: number,
+          _cwd?: string
+        ): Promise<string>;
+      }
+    ).executeCommand(command, 'run_shell_command', undefined, undefined, cwd);
+  };
+
   it('kills a long-running command after the configured timeout (throws, preserving the body)', async () => {
     const { ShellCommandFailedError } = await import('#src/tools/GthDevToolkit.js');
     const start = Date.now();
@@ -184,4 +200,14 @@ d('GthDevToolkit shell hardening (real spawn)', () => {
     expect(result).not.toContain('<COMMAND_OUTPUT>');
     expect(Date.now() - start).toBeLessThan(5_000);
   }, 15_000);
+
+  // ---------------------------------------------------------------------------------------------
+  // EXT-199 — the per-call cwd, exercised against a REAL process rather than a spawn mock.
+  // ---------------------------------------------------------------------------------------------
+
+  it('EXT-199: cwd runs the command in that directory and relative path resolves against workDir', async () => {
+    const result = await runWithCwd('pwd', { shell: { enabled: true } }, 'packages/app');
+    expect(result).toContain('completed successfully');
+    expect(result).toContain('packages/app');
+  }, 10_000);
 });

@@ -320,15 +320,12 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
     mkdirSync(subDir, { recursive: true });
 
     // Grant pnpm test in config
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: 'packages/app' }],
-      {
-        approvals: {
-          mode: 'manual',
-          allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: 'packages/app' }], {
+      approvals: {
+        mode: 'manual',
+        allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
+      },
+    } as unknown as Partial<GthConfig>);
 
     const human = vi.fn();
     runner.setToolApprovalCallback(human);
@@ -342,15 +339,12 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
   });
 
   it('out-of-project: at manual rung, prompts human even when matching grant exists', async () => {
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'manual',
-          allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'manual',
+        allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
+      },
+    } as unknown as Partial<GthConfig>);
 
     let promptedPending: PendingToolInterrupt | undefined;
     const human = vi.fn(async (pending: PendingToolInterrupt): Promise<ToolApprovalDecision> => {
@@ -368,17 +362,17 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
   });
 
   it('out-of-project: at write rung, prompts human even when matching grant exists', async () => {
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'write',
-          allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'write',
+        allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
+      },
+    } as unknown as Partial<GthConfig>);
 
-    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({ type: 'approve', scope: 'once' }));
+    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({
+      type: 'approve',
+      scope: 'once',
+    }));
     runner.setToolApprovalCallback(human);
 
     await runTurn(runner, 'run tests');
@@ -392,17 +386,17 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
     rateShellCommandMock.mockResolvedValue(verdict);
     mapVerdictToActionMock.mockReturnValue({ action: 'approve', verdict });
 
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'assisted',
-          allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'assisted',
+        allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
+      },
+    } as unknown as Partial<GthConfig>);
 
-    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({ type: 'approve', scope: 'once' }));
+    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({
+      type: 'approve',
+      scope: 'once',
+    }));
     runner.setToolApprovalCallback(human);
 
     await runTurn(runner, 'run tests');
@@ -417,17 +411,17 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
     rateShellCommandMock.mockResolvedValue(verdict);
     mapVerdictToActionMock.mockReturnValue({ action: 'approve', verdict });
 
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'auto',
-          allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'auto',
+        allow: [{ type: 'shell', matcher: 'exact', pattern: 'pnpm test' }],
+      },
+    } as unknown as Partial<GthConfig>);
 
-    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({ type: 'approve', scope: 'once' }));
+    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({
+      type: 'approve',
+      scope: 'once',
+    }));
     runner.setToolApprovalCallback(human);
 
     await runTurn(runner, 'run tests');
@@ -438,14 +432,11 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
   });
 
   it('out-of-project: at bypass rung, runs without prompting', async () => {
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'bypass',
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'bypass',
+      },
+    } as unknown as Partial<GthConfig>);
 
     const human = vi.fn();
     runner.setToolApprovalCallback(human);
@@ -481,7 +472,10 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
       } as unknown as Partial<GthConfig>
     );
 
-    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({ type: 'approve', scope: 'once' }));
+    const human = vi.fn(async (): Promise<ToolApprovalDecision> => ({
+      type: 'approve',
+      scope: 'once',
+    }));
     runner.setToolApprovalCallback(human);
 
     await runTurn(runner, 'run first');
@@ -492,14 +486,11 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
   });
 
   it('out-of-project: non-interactive run throws NonInteractiveEscalationError', async () => {
-    const runner = await makeRunner(
-      [{ command: 'pnpm test', cwd: outsideDir }],
-      {
-        approvals: {
-          mode: 'manual',
-        },
-      } as unknown as Partial<GthConfig>
-    );
+    const runner = await makeRunner([{ command: 'pnpm test', cwd: outsideDir }], {
+      approvals: {
+        mode: 'manual',
+      },
+    } as unknown as Partial<GthConfig>);
 
     // No toolApprovalCallback wired
     const error = await runTurn(runner, 'run tests')

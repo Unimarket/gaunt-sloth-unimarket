@@ -486,6 +486,14 @@ may ask for (default 600000 ms, ten minutes). Raise `timeout` when *every* comma
 slow; leave it alone and let the agent ask when one build or one test run is. A request above the
 ceiling runs nothing and is told the ceiling, so the agent's next attempt is a legal one.
 
+Similarly, the agent can pass an optional `cwd` argument to `run_shell_command` to execute a command
+in a specific subdirectory without writing compound prefixes like `cd packages/app && pnpm test`.
+Because `cd sub && cmd` forms a compound command, approval allow rules and grants keyed on `cmd` fail
+to match it and stop to prompt; passing `cwd` keeps the command simple (`pnpm test`), allowing
+in-project grants to apply across any subdirectory. When `cwd` points outside the project,
+confirmation is always required across `manual`, `write`, `assisted`, and `auto` modes even if a
+matching grant exists.
+
 A per-command `builtInTools` object **replaces** the default set entirely, which is why
 `gth_checklist` and `gth_grep` (the two defaults) are listed explicitly — drop them and they are
 gone.

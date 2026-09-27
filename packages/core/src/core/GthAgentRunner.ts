@@ -1934,9 +1934,7 @@ export class GthAgentRunner {
     let startupWorkDir = getStartupWorkDir();
 
     if (isShellCommand && tool.args?.cwd !== undefined) {
-      const res = resolveShellCwd(
-        typeof tool.args.cwd === 'string' ? tool.args.cwd : ''
-      );
+      const res = resolveShellCwd(typeof tool.args.cwd === 'string' ? tool.args.cwd : '');
       if (res.kind === 'refused') {
         // Refusal: nonexistent or non-directory cwd runs nothing.
         return this.stage(record, 'invalid-cwd', {
