@@ -15,7 +15,9 @@
  *   escalation is an immediate non-zero exit carrying the command, the rating and its reason.
  *   There is no prompt, no waiting, and never a timeout into approval. Teams that need specific
  *   commands to run unattended declare them in `approvals.allow` (§3), which is consulted before
- *   the rater and therefore never escalates.
+ *   the rater and therefore never escalates — for a call inside the project. A shell call whose
+ *   `cwd` is outside the project never consults it ([[EXT-199]]), so both stops take a separate
+ *   recovery there ([[EXT-201]], `outOfProjectParts`).
  *
  * Exit code: neither class sets one. The single-shot runtime (`runSingleShot`) already reports a
  * thrown run as `ok: false`, and each command entry point turns that into `setExitCode(1)` — so
@@ -331,10 +333,127 @@ export abstract class ApprovalStopError extends Error {
  * costs stated rather than implied.
  *
  * One sentence, shared, so the two stops that offer it cannot come to describe it differently.
+ *
+ * "Never reaches a halt at all" holds only inside the project: for a shell call whose `cwd` is
+ * outside it, `approvals.allow` is not consulted, and `bypass` is the only recovery that lifts the
+ * stop outright ([[EXT-201]]).
  */
 const BYPASS_LAST_RESORT =
   `Dropping to approvals "bypass" also works, but it turns off the rater, ` +
   `the prompts and the halt for every command in the run.`;
+
+/**
+ * [[EXT-199]]/[[EXT-201]] — **where a shell call was going to run, when that is outside the
+ * project.** Both paths are realpath-resolved by `core/shell/cwd`: `cwd` is the directory the
+ * command would have run in, `projectDir` is the session's startup work directory
+ * (`getStartupWorkDir()`: `INIT_CWD`, else the process cwd, captured once), which is what "the
+ * project" means for this rule. It is NOT the config project directory found by up-tree discovery,
+ * so a session launched from a subdirectory has that subdirectory as its project.
+ *
+ * Passed together, as one object, because neither is meaningful without the other and a stop that
+ * named only one would leave the reader unable to see why the gate called it outside.
+ */
+export interface OutOfProjectCwd {
+  /** The resolved directory the command would have run in. */
+  readonly cwd: string;
+  /** The resolved startup work directory — the project root for this rule. */
+  readonly projectDir: string;
+}
+
+/**
+ * [[EXT-201]] — **the shared seam for a stop forced, or left unanswerable, by an out-of-project
+ * `cwd`.** Both run-ending stops call this, so they cannot come to describe the one rule two ways
+ * (the divergence [[EXT-115]] removed for subject labels).
+ *
+ * ## Why the stop needs its own branch
+ *
+ * [[EXT-199]] made an out-of-project shell call ALWAYS reach a person (`GthAgentRunner`:
+ * `allowlistApplies` is false for it, and the rater's action is rewritten to `escalate` unless it is
+ * a halt). With nobody to ask, the stop used to say only what it says for any escalation: a `safe`
+ * rating with no reason for the stop, and an `approvals.allow` entry for the command — an entry the
+ * gate never consults for that call. Measured with a real Gemini rater: adding the suggested entry
+ * verbatim stopped the rerun identically. A remedy that cannot work is worse than none, so on this
+ * branch **no `approvals.allow` entry is offered, specific or general.**
+ *
+ * ## What it says, and why in these words
+ *
+ * - An `own` sentence names the cause in the gate's voice: the working directory is outside the
+ *   project, so a person must confirm the call whatever its rating, and `approvals.allow` is not
+ *   consulted for it. **The rating row stays** on the escalation: `safe` beside this sentence is
+ *   exactly what tells the reader the directory, not the command, is the reason.
+ * - The two paths are `value` parts labelled `Working directory` and `Project directory`, **never
+ *   interpolated into the sentence.** A path can carry model-authored bytes (the agent chose the
+ *   `cwd`; a symlink target or a directory name can be anything), and an `own` part is painted raw —
+ *   [[EXT-115]]'s ruled constraint. The sentence instead says in words that the project is the
+ *   directory the session started in, because that is what `getStartupWorkDir()` returns and it is
+ *   the fact a user who launched from a subdirectory would otherwise get wrong.
+ * - The remedy is worded as bringing the call **back under the project's own rules**, not as
+ *   letting it run. Starting the session from a directory that contains the working directory makes
+ *   the call in-project; from there it is decided like any other call, which at `manual`, on a
+ *   `destructive` rating or on an `attack` may still stop — so promising more would be the same class
+ *   of false remedy this branch exists to remove. `bypass` is the one thing that lifts it outright
+ *   (the runner returns before any of this for a shell call at `bypass`, and ignores an escalate
+ *   entry there), so {@link BYPASS_LAST_RESORT} is named last, unchanged.
+ *
+ * ## When an `approvals.escalate` entry ALSO matched
+ *
+ * Both obstacles hold independently: removing the escalate entry still leaves the out-of-project
+ * escalation, and moving the session still leaves the escalate entry asking a human wherever the
+ * command runs. So the combined message keeps the `Matched approvals.escalate` row and names both
+ * remedies in one sentence, then `bypass` — which does lift both. The escalate branch's own
+ * sentence ("Remove the escalate entry…") is not reused alone, because on its own it would promise
+ * that removing the entry is enough.
+ *
+ * ## `AttackHaltError` — reachable, traced
+ *
+ * An out-of-project call CAN end in a halt, so it takes the same branch here:
+ * - the allow-tripwire halt in `GthAgentRunner.decideToolApprovalInner` is unreachable for it, since
+ *   that path needs `allowlistApplies`, which is false outside the project;
+ * - the rater's own halt is reachable at `assisted` and `auto`: the out-of-project rewrite to
+ *   `escalate` applies only when `action !== 'halt'`, so an `attack` rating still reaches
+ *   `haltOrRunAnyway`, and with no banner wired that throws {@link AttackHaltError}.
+ * Its in-project recovery ("declare it in approvals.allow … it never reaches a halt") is false for
+ * such a call, because the rater runs whatever the allow list says. The out-of-project halt names
+ * the directories and says to move the session first, then declare it — which is true once the
+ * call is in-project, where the allow list is consulted before the rater.
+ *
+ * ## Signature
+ *
+ * The constructors are public and positional; this is one trailing optional argument rather than a
+ * move to an options object. Every existing caller and spec keeps compiling and keeps its exact
+ * message, and an options-object migration would churn the six spec files that construct these
+ * errors for no behavioural gain. Revisit if another field is ever added.
+ */
+function outOfProjectParts(where: OutOfProjectCwd, sentence: string): ApprovalStopPart[] {
+  return [
+    { kind: 'own', text: sentence },
+    { kind: 'value', label: 'Working directory', text: where.cwd },
+    { kind: 'value', label: 'Project directory', text: where.projectDir },
+  ];
+}
+
+/** [[EXT-201]] — the escalation's statement of the cause; see `outOfProjectParts`. */
+const OUT_OF_PROJECT_ESCALATION =
+  `The command's working directory is outside the project, so a person must confirm it whatever ` +
+  `its rating, and approvals.allow is not consulted for it. The project is the directory this ` +
+  `session started in.`;
+
+/** [[EXT-201]] — the escalation's remedy when no escalate entry also matched. */
+const OUT_OF_PROJECT_REMEDY =
+  `To bring this command back under the project's own rules, approvals.allow included, start ` +
+  `the session from a directory that contains its working directory.`;
+
+/** [[EXT-201]] — the escalation's remedy when an escalate entry ALSO matched. */
+const OUT_OF_PROJECT_AND_ESCALATE_REMEDY =
+  `An escalate entry also matched, and it asks a human wherever the command runs. To run this ` +
+  `command unattended, start the session from a directory that contains its working directory ` +
+  `and remove the escalate entry.`;
+
+/** [[EXT-201]] — the halt's statement of the cause; see `outOfProjectParts`. */
+const OUT_OF_PROJECT_HALT =
+  `The command's working directory is outside the project, where approvals.allow is not ` +
+  `consulted, so no allow entry can prevent this halt. The project is the directory this ` +
+  `session started in.`;
 
 /**
  * §4.2 — an `attack` outcome: the command's own **structure** evidenced compromise (§4.1.1 —
@@ -352,12 +471,27 @@ const BYPASS_LAST_RESORT =
  * rater, so it never reaches a halt at all); `bypass` also works and is far blunter — it turns off
  * the rater, the escalation and the halt together, for every command, for the whole run. It is a
  * last resort, not the answer, and the wording says so in that order.
+ *
+ * [[EXT-201]] — for a call whose `cwd` was outside the project the allow-list does not apply, so
+ * that recovery is replaced; see `outOfProjectParts` for the trace showing this halt is reachable
+ * there.
  */
 export class AttackHaltError extends ApprovalStopError {
   /** The rater's explanation of what the command's structure showed. */
   readonly reason: string;
 
-  constructor(command: string, reason: string, subject?: ApprovalSubject) {
+  /**
+   * [[EXT-201]] — the out-of-project directories, when the halted call's `cwd` was outside the
+   * project. Its presence swaps the recovery; see `outOfProjectParts`.
+   */
+  readonly outOfProject: OutOfProjectCwd | undefined;
+
+  constructor(
+    command: string,
+    reason: string,
+    subject?: ApprovalSubject,
+    outOfProject?: OutOfProjectCwd
+  ) {
     super(
       [
         {
@@ -366,17 +500,32 @@ export class AttackHaltError extends ApprovalStopError {
         },
         ...subjectParts(command, subject),
         { kind: 'value', label: 'Reason', text: reason },
-        {
-          kind: 'own',
-          text:
-            `This is not negotiable. If this command is legitimate and you need it to run, declare ` +
-            `it in approvals.allow — that list is consulted before the auto-rater, so it never ` +
-            `reaches a halt. ${BYPASS_LAST_RESORT}`,
-        },
+        ...(outOfProject
+          ? [
+              ...outOfProjectParts(outOfProject, OUT_OF_PROJECT_HALT),
+              {
+                kind: 'own' as const,
+                text:
+                  `This is not negotiable. If this command is legitimate and you need it to run, ` +
+                  `start the session from a directory that contains its working directory, then ` +
+                  `declare it in approvals.allow — inside the project that list is consulted ` +
+                  `before the auto-rater, so it never reaches a halt. ${BYPASS_LAST_RESORT}`,
+              },
+            ]
+          : [
+              {
+                kind: 'own' as const,
+                text:
+                  `This is not negotiable. If this command is legitimate and you need it to run, declare ` +
+                  `it in approvals.allow — that list is consulted before the auto-rater, so it never ` +
+                  `reaches a halt. ${BYPASS_LAST_RESORT}`,
+              },
+            ]),
       ],
       command
     );
     this.reason = reason;
+    this.outOfProject = outOfProject;
   }
 }
 
@@ -430,6 +579,14 @@ export class NonInteractiveEscalationError extends ApprovalStopError {
    */
   readonly allowEntry: string | undefined;
 
+  /**
+   * [[EXT-201]] — the out-of-project directories, when the call's `cwd` was outside the project.
+   * Its presence is what forced the escalation (or is one of two things that did, alongside
+   * {@link escalatedBy}), and it withholds {@link allowEntry} from the message, since
+   * `approvals.allow` is never consulted for such a call. See `outOfProjectParts`.
+   */
+  readonly outOfProject: OutOfProjectCwd | undefined;
+
   constructor(
     command: string,
     outcome?: string,
@@ -437,7 +594,8 @@ export class NonInteractiveEscalationError extends ApprovalStopError {
     escalatedBy?: string,
     negotiation?: string,
     allowEntry?: string,
-    subject?: ApprovalSubject
+    subject?: ApprovalSubject,
+    outOfProject?: OutOfProjectCwd
   ) {
     const parts: ApprovalStopPart[] = [
       // [[EXT-115]] — the lead sentence takes NO branch: it is already kind-neutral and true of a
@@ -448,7 +606,19 @@ export class NonInteractiveEscalationError extends ApprovalStopError {
     if (outcome) parts.push({ kind: 'value', label: 'Rating', text: outcome });
     if (reason) parts.push({ kind: 'value', label: 'Reason', text: reason });
     if (negotiation) parts.push({ kind: 'block', text: negotiation });
-    if (escalatedBy) {
+    if (outOfProject) {
+      // [[EXT-201]] — checked FIRST, so neither the allow-entry branch nor the general example can
+      // be reached for a call the allow list is never consulted for. The combination with an
+      // escalate entry is decided here too; see `outOfProjectParts` for why both are named.
+      parts.push(...outOfProjectParts(outOfProject, OUT_OF_PROJECT_ESCALATION));
+      if (escalatedBy) {
+        parts.push({ kind: 'value', label: 'Matched approvals.escalate', text: escalatedBy });
+        parts.push({ kind: 'own', text: OUT_OF_PROJECT_AND_ESCALATE_REMEDY });
+      } else {
+        parts.push({ kind: 'own', text: OUT_OF_PROJECT_REMEDY });
+      }
+      parts.push({ kind: 'own', text: BYPASS_LAST_RESORT });
+    } else if (escalatedBy) {
       parts.push({ kind: 'value', label: 'Matched approvals.escalate', text: escalatedBy });
       parts.push({
         kind: 'own',
@@ -489,6 +659,9 @@ export class NonInteractiveEscalationError extends ApprovalStopError {
     this.reason = reason;
     this.escalatedBy = escalatedBy;
     this.negotiation = negotiation;
-    this.allowEntry = allowEntry;
+    // [[EXT-201]] — withheld from the FIELD as well as the message: out of project it is not an
+    // entry that "would let this command run", which is what the field promises its readers.
+    this.allowEntry = outOfProject ? undefined : allowEntry;
+    this.outOfProject = outOfProject;
   }
 }

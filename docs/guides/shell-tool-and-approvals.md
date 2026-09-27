@@ -183,7 +183,9 @@ terminal you still have to decide in.
   really runs. This one **ends the run** instead of asking. In an interactive session you first get
   a red banner (below); where there is nobody to ask — CI, a one-shot `gth exec`, a server — the run
   simply ends. If the command is legitimate and you need it regularly, put it in `approvals.allow`
-  (below) — that list is checked before the rater.
+  (below) — that list is checked before the rater. That holds only inside the project: for a
+  command whose working directory is outside it, the allow list is not consulted, so the command
+  is rated and halts whatever it lists.
 
 #### The red banner: getting past an `attack` verdict
 
@@ -492,7 +494,11 @@ Because `cd sub && cmd` forms a compound command, approval allow rules and grant
 to match it and stop to prompt; passing `cwd` keeps the command simple (`pnpm test`), allowing
 in-project grants to apply across any subdirectory. When `cwd` points outside the project,
 confirmation is always required across `manual`, `write`, `assisted`, and `auto` modes even if a
-matching grant exists.
+matching grant exists. Allow entries and grants do not apply outside the project at all, so in a
+run with nobody to ask such a command stops the run even when it is rated `safe`; the stop names
+the working directory and the project directory. The project is the directory the session started
+in, so the fix is to start the session from a directory that contains the one the command needs,
+or to use `bypass` as a last resort.
 
 A per-command `builtInTools` object **replaces** the default set entirely, which is why
 `gth_checklist` and `gth_grep` (the two defaults) are listed explicitly — drop them and they are
@@ -819,7 +825,9 @@ length-checked when the config loads, so one that cannot compile is an error you
 
 Where there is nobody to ask — CI, a one-shot `gth exec`, a server — an escalation is not a prompt:
 the run **exits non-zero**, printing the command, its rating and the reason. It never waits, and it
-never times out into an approval. Declare what the pipeline is allowed to run:
+never times out into an approval. Declare what the pipeline is allowed to run (these entries apply
+only to commands that run inside the project; one whose working directory is outside it stops the
+run below `bypass`, whatever these entries say):
 
 ```json
 {

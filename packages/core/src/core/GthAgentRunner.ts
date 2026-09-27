@@ -68,6 +68,7 @@ import {
   ApprovalStopError,
   AttackHaltError,
   NonInteractiveEscalationError,
+  type OutOfProjectCwd,
 } from '#src/core/shell/approvalStop.js';
 import {
   attachTerminationReason,
@@ -667,7 +668,14 @@ export class GthAgentRunner {
      * §4.3 keeps the rater on the shell until [[EXT-30]] — so this changes no message that exists
      * yet; what it changes is that the halt stays correct when that arm widens.
      */
-    subject: ApprovalSubject
+    subject: ApprovalSubject,
+    /**
+     * [[EXT-201]] — the call's directories when its `cwd` was outside the project, so a halt with
+     * nobody to ask does not recommend `approvals.allow`, which is never consulted for such a call.
+     * Required-but-undefinable for the same reason `subject` is required: every call site must
+     * decide, rather than a forgotten one silently getting the in-project recovery.
+     */
+    outOfProject: OutOfProjectCwd | undefined
   ): Promise<ToolApprovalDecision> {
     if (this.attackHaltCallback) {
       const answer = await this.attackHaltCallback({ command, reason });
@@ -686,7 +694,7 @@ export class GthAgentRunner {
       // §6.2 — no surface wired the banner, so nobody was asked and the run ends.
       recordHumanAnswer(record, NO_SURFACE_TO_ASK);
     }
-    throw new AttackHaltError(command, reason, subject);
+    throw new AttackHaltError(command, reason, subject, outOfProject);
   }
 
   /**
@@ -1946,6 +1954,13 @@ export class GthAgentRunner {
       isOutsideProject = res.isOutsideProject;
       startupWorkDir = res.startupWorkDir;
     }
+    // [[EXT-201]] — the one value both run-ending stops are handed, derived once from the same
+    // resolution the gate decides on, so the message cannot describe a different directory from
+    // the one that forced the escalation.
+    const outOfProject: OutOfProjectCwd | undefined =
+      isOutsideProject && resolvedCwd !== undefined
+        ? { cwd: resolvedCwd, projectDir: startupWorkDir }
+        : undefined;
 
     // ONE subject and ONE annotation source per decision, shared by the rule matcher and the
     // §4.7.3 floor below. Building a second source for the floor would let a `hint` entry and the
@@ -2148,7 +2163,16 @@ export class GthAgentRunner {
         // entry does not decide whether the banner appears. The entry has already been overruled by
         // the time this line is reached; letting it also silence the one way out would make the
         // recovery depend on a match the human cannot see from the banner.
-        return await this.haltOrRunAnyway(command, tripwire.verdict?.reason ?? '', record, subject);
+        // [[EXT-201]] — `outOfProject` is always undefined here (this branch needs
+        // `allowlistApplies`, which an out-of-project call never has); passed rather than omitted
+        // so the halt's recovery is decided from the same value on both halt paths.
+        return await this.haltOrRunAnyway(
+          command,
+          tripwire.verdict?.reason ?? '',
+          record,
+          subject,
+          outOfProject
+        );
       }
       // `catastrophic` — the one outcome the tripwire escalates. Fall through to the human.
       safetyVerdict = tripwire.verdict;
@@ -2493,7 +2517,9 @@ export class GthAgentRunner {
             subject.command,
             decision.verdict?.reason ?? '',
             record,
-            subject
+            subject,
+            // [[EXT-201]] — reachable out of project: the rewrite above spares a halt.
+            outOfProject
           );
         }
         // §5 — the attempt just ruled on, as the transcript records it.
@@ -2672,7 +2698,10 @@ export class GthAgentRunner {
         allowEntry ? renderApprovalEntryObject(allowEntry) : undefined,
         // [[EXT-115]] — the discriminator the whole decision above ran on, so the message names
         // what it gated instead of calling a `write_file` or an MCP call a `Command`.
-        subject
+        subject,
+        // [[EXT-201]] — an out-of-project call names both directories and gets no allow entry,
+        // derived or general: `allowlistApplies` above is false for it, so none could match.
+        outOfProject
       );
     }
 

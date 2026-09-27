@@ -723,3 +723,197 @@ describe('[[EXT-115]] the stop LABELS the subject kind the gate decided on', () 
     });
   });
 });
+
+/**
+ * [[EXT-201]] — **a stop forced by an out-of-project `cwd` says so, and offers no allow entry.**
+ *
+ * `approvals.allow` is never consulted for a shell call whose working directory is outside the
+ * project, so the specific entry the in-project stop derives is a line the reader could paste and
+ * watch do nothing — which a real-Gemini trial measured. These pin the whole parts list, so every
+ * sentence and every label is held, and the in-project stop beside it is pinned unchanged.
+ */
+describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
+  const SHELL: ApprovalSubject = { kind: 'shell', command: 'cat marker.txt' };
+  const WHERE = { cwd: '/tmp/elsewhere/outside', projectDir: '/tmp/elsewhere/project' };
+  const ENTRY = '{ "type": "shell", "matcher": "exact", "pattern": "cat marker.txt" }';
+  const ESCALATE = '{"type":"shell","matcher":"exact","pattern":"cat marker.txt"}';
+
+  const CAUSE =
+    "The command's working directory is outside the project, so a person must confirm it " +
+    'whatever its rating, and approvals.allow is not consulted for it. The project is the ' +
+    'directory this session started in.';
+  const BYPASS =
+    'Dropping to approvals "bypass" also works, but it turns off the rater, the prompts and ' +
+    'the halt for every command in the run.';
+
+  it('names the cause and both directories, keeps the rating, and offers no allow entry', () => {
+    const error = new NonInteractiveEscalationError(
+      'cat marker.txt',
+      'safe',
+      'Read-only inspection of a local text file.',
+      undefined,
+      undefined,
+      ENTRY,
+      SHELL,
+      WHERE
+    );
+    expect(error.parts).toEqual([
+      { kind: 'own', text: 'Approval required, but this session has no one to ask.' },
+      { kind: 'command', label: 'Command', text: 'cat marker.txt' },
+      { kind: 'value', label: 'Rating', text: 'safe' },
+      { kind: 'value', label: 'Reason', text: 'Read-only inspection of a local text file.' },
+      { kind: 'own', text: CAUSE },
+      { kind: 'value', label: 'Working directory', text: WHERE.cwd },
+      { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
+      {
+        kind: 'own',
+        text:
+          "To bring this command back under the project's own rules, approvals.allow included, " +
+          'start the session from a directory that contains its working directory.',
+      },
+      { kind: 'own', text: BYPASS },
+    ]);
+    expect(error.message).not.toContain(ENTRY);
+    expect(error.message).not.toContain('"pattern": "npm test"');
+    expect(error.allowEntry, 'the field is withheld with the message').toBeUndefined();
+    expect(error.outOfProject).toEqual(WHERE);
+  });
+
+  it('names both obstacles when an escalate entry also matched', () => {
+    const error = new NonInteractiveEscalationError(
+      'cat marker.txt',
+      undefined,
+      undefined,
+      ESCALATE,
+      undefined,
+      ENTRY,
+      SHELL,
+      WHERE
+    );
+    expect(error.parts).toEqual([
+      { kind: 'own', text: 'Approval required, but this session has no one to ask.' },
+      { kind: 'command', label: 'Command', text: 'cat marker.txt' },
+      { kind: 'own', text: CAUSE },
+      { kind: 'value', label: 'Working directory', text: WHERE.cwd },
+      { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
+      { kind: 'value', label: 'Matched approvals.escalate', text: ESCALATE },
+      {
+        kind: 'own',
+        text:
+          'An escalate entry also matched, and it asks a human wherever the command runs. To run ' +
+          'this command unattended, start the session from a directory that contains its working ' +
+          'directory and remove the escalate entry.',
+      },
+      { kind: 'own', text: BYPASS },
+    ]);
+  });
+
+  /** The in-project stop is UNCHANGED: the derived entry, then `bypass`. */
+  it('leaves the in-project stop offering the specific allow entry', () => {
+    const error = new NonInteractiveEscalationError(
+      'cat marker.txt',
+      'destructive',
+      'it reads',
+      undefined,
+      undefined,
+      ENTRY,
+      SHELL
+    );
+    expect(error.parts.slice(-3)).toEqual([
+      {
+        kind: 'own',
+        text:
+          'Declare the commands this run is allowed to execute in approvals.allow — that list is ' +
+          'consulted before the auto-rater, ahead of its deterministic preflights, and never ' +
+          'escalates. For this command, add:',
+      },
+      { kind: 'value', label: 'approvals.allow entry', text: ENTRY },
+      { kind: 'own', text: BYPASS },
+    ]);
+    expect(error.parts.map((part) => (part.kind === 'own' ? part.text : ''))).not.toContain(CAUSE);
+    expect(error.allowEntry).toBe(ENTRY);
+    expect(error.outOfProject).toBeUndefined();
+  });
+
+  it('halts with the directories named and the in-project recovery replaced', () => {
+    const error = new AttackHaltError('cat marker.txt', 'hides what it runs', SHELL, WHERE);
+    expect(error.parts).toEqual([
+      {
+        kind: 'own',
+        text: 'Run halted: the auto-rater rated this command as an attack, which ends the run.',
+      },
+      { kind: 'command', label: 'Command', text: 'cat marker.txt' },
+      { kind: 'value', label: 'Reason', text: 'hides what it runs' },
+      {
+        kind: 'own',
+        text:
+          "The command's working directory is outside the project, where approvals.allow is not " +
+          'consulted, so no allow entry can prevent this halt. The project is the directory this ' +
+          'session started in.',
+      },
+      { kind: 'value', label: 'Working directory', text: WHERE.cwd },
+      { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
+      {
+        kind: 'own',
+        text:
+          'This is not negotiable. If this command is legitimate and you need it to run, start ' +
+          'the session from a directory that contains its working directory, then declare it in ' +
+          'approvals.allow — inside the project that list is consulted before the auto-rater, so ' +
+          `it never reaches a halt. ${BYPASS}`,
+      },
+    ]);
+    expect(error.outOfProject).toEqual(WHERE);
+  });
+
+  it('leaves the in-project halt recovery unchanged', () => {
+    const error = new AttackHaltError('cat marker.txt', 'hides what it runs', SHELL);
+    expect(ownTexts(error.parts).at(-1)).toBe(
+      'This is not negotiable. If this command is legitimate and you need it to run, declare it ' +
+        'in approvals.allow — that list is consulted before the auto-rater, so it never reaches a ' +
+        `halt. ${BYPASS}`
+    );
+    expect(error.outOfProject).toBeUndefined();
+  });
+
+  /**
+   * [[EXT-115]]'s constraint: a path can carry model-authored bytes, so both directories ride on
+   * `value` parts, are neutralised in the message and framed in the rows — never the gate's voice.
+   */
+  it('keeps hostile directory names out of the gate’s own sentences', () => {
+    const hostile = {
+      cwd: `/tmp/x${CR}${FORGED_MENU}`,
+      projectDir: `/tmp/p${ESC}[2J${LF}${FORGED_VERDICT}`,
+    };
+    for (const error of [
+      new NonInteractiveEscalationError(
+        'ls',
+        'safe',
+        'r',
+        undefined,
+        undefined,
+        ENTRY,
+        SHELL,
+        hostile
+      ),
+      new AttackHaltError('ls', 'r', SHELL, hostile),
+    ]) {
+      const own = ownTexts(error.parts);
+      for (const text of own) {
+        expect(text).not.toContain(FORGED_MENU);
+        expect(text).not.toContain(FORGED_VERDICT);
+      }
+      for (const line of error.message.split('\n')) {
+        expect(line, `a raw unprintable survived in: ${JSON.stringify(line)}`).not.toMatch(
+          UNPRINTABLE
+        );
+      }
+      const rows = approvalStopRows(error.parts, { columns: 100 });
+      for (const row of rows) {
+        if (own.includes(row) || !(row.includes(FORGED_MENU) || row.includes(FORGED_VERDICT))) {
+          continue;
+        }
+        expect(row, `a directory is not framed: ${JSON.stringify(row)}`).toMatch(GUTTERED);
+      }
+    }
+  });
+});

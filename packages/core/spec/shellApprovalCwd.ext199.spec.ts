@@ -28,7 +28,7 @@ import type {
 import type { GthConfig } from '#src/config.js';
 import { approvalRequestRows } from '#src/core/approvals/approvalRequest.js';
 import { buildRaterPrompt } from '#src/core/shell/rater.js';
-import { NonInteractiveEscalationError } from '#src/core/shell/approvalStop.js';
+import { AttackHaltError, NonInteractiveEscalationError } from '#src/core/shell/approvalStop.js';
 
 const { rateShellCommandMock, mapVerdictToActionMock } = vi.hoisted(() => ({
   rateShellCommandMock: vi.fn(),
@@ -499,5 +499,121 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
 
     expect(error).toBeInstanceOf(NonInteractiveEscalationError);
     expect(executed).toHaveLength(0);
+  });
+
+  /**
+   * [[EXT-201]] — end to end through the runner: the stop with nobody to ask names the directory
+   * as the reason, keeps the `safe` rating, and offers no allow entry — even with the exact entry
+   * the old message suggested already configured, which is the measured case. Every escape vector.
+   * Directories compare against `realpathSync` values, never POSIX literals (the Windows cell).
+   */
+  const catchTurn = (runner: InstanceType<typeof GthAgentRunner>, prompt: string) =>
+    runTurn(runner, prompt)
+      .then(() => null)
+      .catch((e: unknown) => e as Error);
+
+  const valueOf = (error: { parts: readonly any[] }, label: string): string | undefined =>
+    error.parts.find((part) => part.kind === 'value' && part.label === label)?.text;
+
+  const OUT_OF_PROJECT_CAUSE = "The command's working directory is outside the project";
+
+  it.each([
+    ['an absolute path', () => outsideDir],
+    ['a .. traversal', () => '../outside'],
+    [
+      'a symlink pointing outside',
+      () => {
+        symlinkSync(outsideDir, path.join(projectDir, 'link-out'), 'junction');
+        return 'link-out';
+      },
+    ],
+  ])(
+    'EXT-201: auto, rated safe, %s: names both directories and offers no allow entry',
+    async (_name, cwdFor) => {
+      const verdict = { outcome: 'safe', reason: 'Read-only inspection of a local text file.' };
+      rateShellCommandMock.mockResolvedValue(verdict);
+      mapVerdictToActionMock.mockReturnValue({ action: 'approve', verdict });
+
+      const runner = await makeRunner([{ command: 'cat marker.txt', cwd: cwdFor() }], {
+        approvals: {
+          mode: 'auto',
+          allow: [{ type: 'shell', matcher: 'exact', pattern: 'cat marker.txt' }],
+        },
+      } as unknown as Partial<GthConfig>);
+
+      const error = await catchTurn(runner, 'read it');
+
+      expect(error).toBeInstanceOf(NonInteractiveEscalationError);
+      const stop = error as NonInteractiveEscalationError;
+      expect(executed).toHaveLength(0);
+      expect(stop.outcome).toBe('safe');
+      expect(valueOf(stop, 'Rating')).toBe('safe');
+      expect(valueOf(stop, 'Working directory')).toBe(realpathSync(outsideDir));
+      expect(valueOf(stop, 'Project directory')).toBe(realpathSync(projectDir));
+      expect(stop.message).toContain(OUT_OF_PROJECT_CAUSE);
+      expect(valueOf(stop, 'approvals.allow entry')).toBeUndefined();
+      expect(stop.allowEntry).toBeUndefined();
+      expect(stop.message).not.toContain('"pattern": "cat marker.txt"');
+      expect(stop.message).not.toContain('Declare the commands this run is allowed to execute');
+    }
+  );
+
+  it('EXT-201: an in-project stop with nobody to ask still offers the specific allow entry', async () => {
+    mkdirSync(path.join(projectDir, 'packages', 'app'), { recursive: true });
+    const runner = await makeRunner([{ command: 'cat marker.txt', cwd: 'packages/app' }], {
+      approvals: { mode: 'manual' },
+    } as unknown as Partial<GthConfig>);
+
+    const error = await catchTurn(runner, 'read it');
+
+    expect(error).toBeInstanceOf(NonInteractiveEscalationError);
+    const stop = error as NonInteractiveEscalationError;
+    expect(stop.outOfProject).toBeUndefined();
+    expect(valueOf(stop, 'approvals.allow entry')).toBe(
+      '{ "type": "shell", "matcher": "exact", "pattern": "cat marker.txt" }'
+    );
+    expect(stop.message).not.toContain(OUT_OF_PROJECT_CAUSE);
+  });
+
+  /**
+   * [[EXT-201]] — the out-of-project rewrite to `escalate` spares a halt, so an `attack` rating on
+   * an out-of-project call DOES reach `AttackHaltError`; its allow-list recovery must not appear.
+   */
+  it('EXT-201: an out-of-project attack halts naming both directories, without the allow-list recovery', async () => {
+    const verdict = { outcome: 'attack', reason: 'hides what it runs' };
+    rateShellCommandMock.mockResolvedValue(verdict);
+    mapVerdictToActionMock.mockReturnValue({ action: 'halt', verdict });
+
+    const runner = await makeRunner([{ command: 'cat marker.txt', cwd: outsideDir }], {
+      approvals: { mode: 'auto' },
+    } as unknown as Partial<GthConfig>);
+
+    const error = await catchTurn(runner, 'read it');
+
+    expect(error).toBeInstanceOf(AttackHaltError);
+    const halt = error as AttackHaltError;
+    expect(executed).toHaveLength(0);
+    expect(valueOf(halt, 'Working directory')).toBe(realpathSync(outsideDir));
+    expect(valueOf(halt, 'Project directory')).toBe(realpathSync(projectDir));
+    expect(halt.message).toContain(OUT_OF_PROJECT_CAUSE);
+    expect(halt.message).not.toContain('declare it in approvals.allow — that list is consulted');
+  });
+
+  it('EXT-201: an in-project attack keeps the allow-list recovery', async () => {
+    const verdict = { outcome: 'attack', reason: 'hides what it runs' };
+    rateShellCommandMock.mockResolvedValue(verdict);
+    mapVerdictToActionMock.mockReturnValue({ action: 'halt', verdict });
+
+    const runner = await makeRunner([{ command: 'cat marker.txt', cwd: '.' }], {
+      approvals: { mode: 'auto' },
+    } as unknown as Partial<GthConfig>);
+
+    const error = await catchTurn(runner, 'read it');
+
+    expect(error).toBeInstanceOf(AttackHaltError);
+    const halt = error as AttackHaltError;
+    expect(halt.outOfProject).toBeUndefined();
+    expect(halt.message).toContain('declare it in approvals.allow — that list is consulted');
+    expect(halt.message).not.toContain(OUT_OF_PROJECT_CAUSE);
   });
 });
