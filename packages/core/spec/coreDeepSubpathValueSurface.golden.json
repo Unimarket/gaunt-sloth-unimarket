@@ -290,6 +290,10 @@
           "kind": "function"
         },
         {
+          "name": "loadConfiguredHistoryDbPath",
+          "kind": "function"
+        },
+        {
           "name": "loadConfiguredTui",
           "kind": "function"
         },

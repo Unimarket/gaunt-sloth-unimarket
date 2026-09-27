@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { checkpointThreadIds, indexPath } from './fixtures/historyStoreFiles.mjs';
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { tool } from '@langchain/core/tools';
@@ -61,12 +62,13 @@ vi.mock('#src/history/checkpointSaver.js', async (importOriginal) => {
       if (faults.failOpen) return null;
       const saver = actual.openCheckpointSaver(...args);
       if (saver && faults.failWritesAfterFirst) {
-        const { db } = saver as unknown as { db: DatabaseSync };
+        // GS2-121 — one connection per thread file; the run writes one thread.
+        const { connections } = saver as unknown as { connections: Map<string, DatabaseSync> };
         const put = saver.put.bind(saver);
         let puts = 0;
         saver.put = async (...putArgs: Parameters<typeof put>) => {
           const out = await put(...putArgs);
-          if (++puts === 1) db.exec('PRAGMA query_only = 1');
+          if (++puts === 1) for (const db of connections.values()) db.exec('PRAGMA query_only = 1');
           return out;
         };
       }
@@ -203,7 +205,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
   };
 
   const sql = <T = Record<string, unknown>>(query: string, ...params: (string | number)[]): T[] => {
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(indexPath(dbPath));
     try {
       return db.prepare(query).all(...params) as T[];
     } finally {
@@ -257,8 +259,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
       // Each turn says which command ran it; the conversation keeps what it was recorded as.
       expect(turns.map((t) => t.command)).toEqual(['ask', 'exec']);
       // And the new turn's state landed under the conversation's own thread.
-      const threads = sql<{ thread_id: string }>(`SELECT DISTINCT thread_id FROM checkpoints`);
-      expect(threads).toEqual([{ thread_id: String(row(conversationId).thread_id) }]);
+      expect(checkpointThreadIds(dbPath)).toEqual([String(row(conversationId).thread_id)]);
     },
     REAL_AGENT_TIMEOUT_MS
   );
@@ -314,7 +315,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
       const first = await run('look up the code');
       const { conversationId } = first.conversation!;
       // What a pre-migration row looks like: the same row, with no run id.
-      const db = new DatabaseSync(dbPath);
+      const db = new DatabaseSync(indexPath(dbPath));
       db.prepare(`UPDATE conversations SET run_id = NULL WHERE id = ?`).run(conversationId);
       db.close();
 
@@ -415,7 +416,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
         expect(hintsOf()).toEqual([
           {
             title: `To continue this conversation: gth ask --resume ${runId} "…"`,
-            lines: [`Conversation #${conversationId}.`, `History file: ${dbPath}`],
+            lines: [`Conversation #${conversationId}.`, `History store: ${dbPath}`],
           },
         ]);
       },
@@ -488,7 +489,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
         expect(noHintsOf()[0].title).toContain('a checkpoint write failed during the run');
         expect(noHintsOf()[0].lines).toEqual([
           `Conversation #${second.conversation!.conversationId}.`,
-          `History file: ${dbPath}`,
+          `History store: ${dbPath}`,
         ]);
       },
       REAL_AGENT_TIMEOUT_MS
@@ -499,7 +500,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
       async () => {
         const first = await run('look up the code');
         const { conversationId } = first.conversation!;
-        const db = new DatabaseSync(dbPath);
+        const db = new DatabaseSync(indexPath(dbPath));
         db.prepare(`UPDATE conversations SET run_id = NULL WHERE id = ?`).run(conversationId);
         db.close();
 

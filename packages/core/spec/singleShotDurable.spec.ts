@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { checkpointThreadIds, countRows, indexPath } from './fixtures/historyStoreFiles.mjs';
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { tool } from '@langchain/core/tools';
@@ -68,12 +69,13 @@ vi.mock('#src/history/checkpointSaver.js', async (importOriginal) => {
       if (saver && faults.failWritesAfterFirst) {
         // One checkpoint lands, then the connection turns read-only: a real SQLite write failure
         // arriving MID-RUN, which the saver catches and reports through its degrade callback.
-        const { db } = saver as unknown as { db: DatabaseSync };
+        // GS2-121 — the saver holds one connection per thread file; the run writes one thread.
+        const { connections } = saver as unknown as { connections: Map<string, DatabaseSync> };
         const put = saver.put.bind(saver);
         let puts = 0;
         saver.put = async (...putArgs: Parameters<typeof put>) => {
           const out = await put(...putArgs);
-          if (++puts === 1) db.exec('PRAGMA query_only = 1');
+          if (++puts === 1) for (const db of connections.values()) db.exec('PRAGMA query_only = 1');
           return out;
         };
       }
@@ -179,23 +181,20 @@ describe('GS2-106 — a recorded single-shot run checkpoints durably', () => {
     return runSingleShot('SINGLE-SHOT', '', prompt, config, resolvers(), 'ask');
   };
 
-  /** Row counts of every table a recorded run writes to, read straight off the file. */
+  /**
+   * Row counts of every table a recorded run writes to, read straight off the files: the index for
+   * the conversation tables, every thread file for the checkpoint tables.
+   */
   const tableCounts = (): Record<string, number> => {
-    const db = new DatabaseSync(dbPath);
-    try {
-      const out: Record<string, number> = {};
-      for (const table of ['conversations', 'sessions', 'checkpoints', 'checkpoint_writes']) {
-        const r = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as Record<string, unknown>;
-        out[table] = Number(r.n);
-      }
-      return out;
-    } finally {
-      db.close();
+    const out: Record<string, number> = {};
+    for (const table of ['conversations', 'sessions', 'checkpoints', 'checkpoint_writes']) {
+      out[table] = countRows(dbPath, table);
     }
+    return out;
   };
 
   const row = (conversationId: number): Record<string, unknown> | undefined => {
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(indexPath(dbPath));
     try {
       return db
         .prepare(`SELECT thread_id, run_id, command FROM conversations WHERE id = ?`)
@@ -205,17 +204,8 @@ describe('GS2-106 — a recorded single-shot run checkpoints durably', () => {
     }
   };
 
-  const countWhere = (table: string, threadId: string): number => {
-    const db = new DatabaseSync(dbPath);
-    try {
-      const r = db
-        .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE thread_id = ?`)
-        .get(threadId) as Record<string, unknown>;
-      return Number(r.n);
-    } finally {
-      db.close();
-    }
-  };
+  const countWhere = (table: string, threadId: string): number =>
+    countRows(dbPath, table, threadId);
 
   /** The messages in the newest checkpoint of `threadId`, read back through a fresh saver. */
   const latestMessages = async (threadId: string): Promise<BaseMessage[]> => {
@@ -327,19 +317,7 @@ describe('GS2-106 — a recorded single-shot run checkpoints durably', () => {
       expect(vi.mocked(consoleUtils.displayWarning).mock.calls[0][0]).toContain('resumable');
       expect(result.conversation).toBeDefined();
       // The first checkpoint did land — so this is a TRUNCATED chain, the case the cut exists for.
-      const threads = (() => {
-        const db = new DatabaseSync(dbPath);
-        try {
-          return (
-            db.prepare(`SELECT DISTINCT thread_id FROM checkpoints`).all() as Record<
-              string,
-              unknown
-            >[]
-          ).map((r) => String(r.thread_id));
-        } finally {
-          db.close();
-        }
-      })();
+      const threads = checkpointThreadIds(dbPath) as string[];
       const controlThread = String(row(control.conversation!.conversationId)!.thread_id);
       const truncated = threads.filter((t) => t !== controlThread);
       expect(truncated).toHaveLength(1);
@@ -439,18 +417,8 @@ describe('GS2-106 — a recorded single-shot run checkpoints durably', () => {
         expect(messages[messages.length - 1].content).toBe(ANSWER);
       }
       // And no checkpoint was written under a thread that no conversation names.
-      const db = new DatabaseSync(dbPath);
-      try {
-        const threads = (
-          db.prepare(`SELECT DISTINCT thread_id FROM checkpoints`).all() as Record<
-            string,
-            unknown
-          >[]
-        ).map((r) => String(r.thread_id));
-        expect(threads.sort()).toEqual([threadA, threadB].sort());
-      } finally {
-        db.close();
-      }
+      const threads = checkpointThreadIds(dbPath) as string[];
+      expect(threads.sort()).toEqual([threadA, threadB].sort());
     },
     REAL_AGENT_TIMEOUT_MS
   );

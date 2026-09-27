@@ -269,11 +269,17 @@ describe('history/historyStore', () => {
     });
 
     it('adds the grants column to a database written before it existed', () => {
+      // GS2-121 — a single-file store from before the column existed, as a user has it on disk: the
+      // first open splits it, and the conversation keeps its thread and gains the column.
       const dbPath = resolve(dir, 'pre-grants.db');
-      const legacy = openHistoryStore(dbPath, { create: true })!;
-      legacy.close();
       const raw = new DatabaseSync(dbPath);
-      raw.exec('DROP TABLE conversations');
+      raw.exec(
+        `CREATE TABLE sessions (
+           id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, project TEXT, command TEXT,
+           model TEXT, prompt TEXT, response TEXT, tokens_input INTEGER, tokens_output INTEGER,
+           cost_usd REAL, tools TEXT, duration_ms INTEGER, conversation_id INTEGER
+         )`
+      );
       raw.exec(
         `CREATE TABLE conversations (
            id INTEGER PRIMARY KEY AUTOINCREMENT,

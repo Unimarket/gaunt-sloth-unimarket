@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -121,16 +121,17 @@ describe('history/recordSessionSafe', () => {
   });
 
   it('fails soft (returns null, no throw) when enabled but the DB path is unusable', () => {
-    // Point at a path whose parent is a file, so opening/creating the DB fails.
-    const unusable = resolve(dir, 'history.db');
-    // dir itself exists; use dir as the DB path (a directory) → open must fail soft.
+    // Point at a path whose parent is a file, so creating the store directory fails.
+    const parentFile = resolve(dir, 'not-a-directory');
+    writeFileSync(parentFile, 'plain file');
+    const unusable = resolve(parentFile, 'history.db');
     const id = recordSessionSafe(
-      { history: { enabled: true, dbPath: dir } },
+      { history: { enabled: true, dbPath: unusable } },
       { command: 'ask', prompt: 'q' }
     );
     expect(id).toBeNull();
-    // The sibling real path was never created.
-    expect(existsSync(unusable)).toBe(false);
+    // Nothing was created beside it either.
+    expect(existsSync(resolve(dir, 'history.db'))).toBe(false);
   });
 });
 
@@ -207,10 +208,16 @@ describe('history: the conversation-to-thread link', () => {
     // A pre-GS2-20 store: conversations with no thread_id column at all. The migration must add it
     // in place, leave the existing rows readable, and record a thread on new ones — the same
     // in-place ALTER precedent the conversation grouping already set.
-    const legacy = openHistoryStore(dbPath, { create: true })!;
-    legacy.close();
+    //
+    // GS2-121 — built as a single-file store is on disk, which the first open splits.
     const raw = new DatabaseSync(dbPath);
-    raw.exec('DROP TABLE conversations');
+    raw.exec(
+      `CREATE TABLE sessions (
+         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, project TEXT, command TEXT,
+         model TEXT, prompt TEXT, response TEXT, tokens_input INTEGER, tokens_output INTEGER,
+         cost_usd REAL, tools TEXT, duration_ms INTEGER, conversation_id INTEGER
+       )`
+    );
     raw.exec(
       `CREATE TABLE conversations (
          id INTEGER PRIMARY KEY AUTOINCREMENT,

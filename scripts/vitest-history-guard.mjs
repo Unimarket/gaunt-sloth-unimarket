@@ -74,7 +74,7 @@ function fingerprintPath(path, into) {
   }
   if (stats.isDirectory()) {
     into.set(path, 'directory');
-    let entries = [];
+    let entries;
     try {
       entries = readdirSync(path).sort();
     } catch (error) {

@@ -25,7 +25,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { checkpointThreadIds, countRows, openThreadFile } from './fixtures/historyStoreFiles.mjs';
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { tool } from '@langchain/core/tools';
@@ -190,25 +190,11 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
     return id;
   };
 
-  const countCheckpoints = (threadId: string): number => {
-    const db = new DatabaseSync(dbPath);
-    const row = db
-      .prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = ?`)
-      .get(threadId) as Record<string, unknown>;
-    db.close();
-    return Number(row.n);
-  };
+  /** A thread's checkpoints, counted in its own file; a thread with no file has none. */
+  const countCheckpoints = (threadId: string): number => countRows(dbPath, 'checkpoints', threadId);
 
-  /** Every thread the checkpoint table currently holds — how a rotated thread is identified. */
-  const threadsInStore = (): string[] => {
-    const db = new DatabaseSync(dbPath);
-    const rows = db.prepare(`SELECT DISTINCT thread_id FROM checkpoints`).all() as Record<
-      string,
-      unknown
-    >[];
-    db.close();
-    return rows.map((r) => String(r.thread_id));
-  };
+  /** Every thread that holds a checkpoint — how a rotated thread is identified. */
+  const threadsInStore = (): string[] => checkpointThreadIds(dbPath) as string[];
 
   /**
    * Push a thread's checkpoints back in time by rewriting the `ts` the saver stored — the one field
@@ -217,7 +203,7 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
    * nothing else.
    */
   const ageThread = (threadId: string, ms = 30 * DAY): void => {
-    const db = new DatabaseSync(dbPath);
+    const db = openThreadFile(dbPath, threadId);
     const rows = db
       .prepare(`SELECT checkpoint_id, checkpoint FROM checkpoints WHERE thread_id = ?`)
       .all(threadId) as Record<string, unknown>[];
@@ -333,7 +319,7 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
         nameThread(thread);
         first.close();
 
-        const db = new DatabaseSync(dbPath);
+        const db = openThreadFile(dbPath, thread);
         const ids = (
           db
             .prepare(
@@ -374,7 +360,7 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
 
         // CONTROL — the same resume once the whole thread is gone answers from nothing, so the
         // assertion above is about what the checkpoints hold and not about the model's habits.
-        const db2 = new DatabaseSync(dbPath);
+        const db2 = openThreadFile(dbPath, thread);
         db2.prepare(`DELETE FROM checkpoints WHERE thread_id = ?`).run(thread);
         db2.prepare(`DELETE FROM checkpoint_writes WHERE thread_id = ?`).run(thread);
         db2.close();
@@ -398,7 +384,7 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
         const stale = openSaver();
         await say(await makeRunner(stale, 'stale-orphan'), 'look up the code');
         stale.close();
-        const db = new DatabaseSync(dbPath);
+        const db = openThreadFile(dbPath, 'stale-orphan');
         // Age it past the grace window by rewriting the `ts` the saver stored — the field the age gate
         // reads, left exactly as the serializer shapes it.
         const rows = db
@@ -435,7 +421,7 @@ describe('GS2-107 — retention at the policy boundary, on a real runner', () =>
         const stale = openSaver();
         await say(await makeRunner(stale, 'stale-orphan-2'), 'look up the code');
         stale.close();
-        const db = new DatabaseSync(dbPath);
+        const db = openThreadFile(dbPath, 'stale-orphan-2');
         const rows = db
           .prepare(
             `SELECT checkpoint_id, checkpoint FROM checkpoints WHERE thread_id = 'stale-orphan-2'`

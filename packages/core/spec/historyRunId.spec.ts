@@ -6,13 +6,15 @@
  * `migrate()` swallows every error, so "the store opened" proves nothing about the migration; the
  * schema itself is read back with `PRAGMA table_info` / `PRAGMA index_list`.
  *
- * Every database here is a temp file or `:memory:`. Nothing resolves a path from `HOME`.
+ * Every database here is a temp file or `:memory:`. Nothing resolves a path from `HOME`. GS2-121: a
+ * store is a directory, so the rows are read back from its index.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
+import { historyStorePaths } from '#src/history/historyLayout.js';
 /** The module under test, imported inside each test. */
 const history = () => import('#src/history/historyStore.js');
 
@@ -57,7 +59,8 @@ const PRE_RUN_ID_SCHEMA = `
 type Row = Record<string, unknown>;
 
 const runIds = (dbPath: string): Row[] => {
-  const db = new DatabaseSync(dbPath);
+  // GS2-121 — the conversation rows are read from the store's index.
+  const db = new DatabaseSync(historyStorePaths(dbPath).index);
   try {
     return db.prepare(`SELECT id, run_id FROM conversations ORDER BY id`).all() as Row[];
   } finally {
@@ -147,7 +150,7 @@ describe('GS2-106 — every new conversation row is minted a run id', () => {
     expect(store).not.toBeNull();
     store.close();
 
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(historyStorePaths(dbPath).index);
     try {
       const stamped = db
         .prepare(`SELECT COUNT(*) AS n FROM sessions WHERE conversation_id IS NULL`)
@@ -196,7 +199,7 @@ describe('GS2-106 — a database from before run ids migrates in place', () => {
     expect(store).not.toBeNull();
     store.close();
 
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(historyStorePaths(dbPath).index);
     try {
       const cols = db.prepare(`PRAGMA table_info(conversations)`).all() as Row[];
       expect(cols.map((c) => c.name)).toContain('run_id');

@@ -38,15 +38,9 @@ import {
 } from '#src/history/historyFiles.js';
 import { INDEX_SCHEMA_STEPS, closeQuietly, migrateFile } from '#src/history/historyMigrations.js';
 
-export {
-  HISTORY_DB_FILENAME,
-  HISTORY_INDEX_FILENAME,
-  HISTORY_THREADS_DIRNAME,
-  historyStorePaths,
-  resolveHistoryDbPath,
-  threadFilePath,
-  type HistoryStorePaths,
-} from '#src/history/historyLayout.js';
+// The layout's names stay internal (`historyLayout.ts`); only what this module always exported is
+// re-exported, so the public surface grows by the rebuild and nothing else.
+export { HISTORY_DB_FILENAME, resolveHistoryDbPath } from '#src/history/historyLayout.js';
 export type { IndexRebuildSummary } from '#src/history/historyFiles.js';
 
 /** A single persisted session record (all analytics fields optional; populated when available). */

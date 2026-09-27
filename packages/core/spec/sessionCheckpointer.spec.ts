@@ -24,6 +24,7 @@ import { createAgent } from 'langchain';
 import { openSessionCheckpointerSafe } from '#src/history/sessionCheckpointer.js';
 import { lookupConversationThreadSafe, openConversationSafe } from '#src/history/recordSession.js';
 import { GthSqliteSaver } from '#src/history/checkpointSaver.js';
+import { historyStorePaths } from '#src/history/historyLayout.js';
 import type { SessionCheckpointer } from '#src/history/sessionCheckpointer.js';
 
 /** A model that answers with the number of messages it was handed, so state growth is observable. */
@@ -218,13 +219,29 @@ describe('GS2-20: a checkpoint write that fails mid-session', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** Make every WRITE on the saver's own connection fail, leaving reads intact. */
+  /**
+   * Make every WRITE on the saver's own connections fail, leaving reads intact. GS2-121 — the saver
+   * holds one connection per thread file and opens them lazily, so both the ones it holds and every
+   * one it opens from here on are switched.
+   */
   const breakWrites = (checkpointer: SessionCheckpointer): void => {
-    const { db } = checkpointer.saver as unknown as { db: DatabaseSync };
-    db.exec('PRAGMA query_only = 1');
+    const saver = checkpointer.saver as unknown as {
+      connections: Map<string, DatabaseSync>;
+      connection(threadId: string, create: boolean): DatabaseSync | undefined;
+    };
+    for (const db of saver.connections.values()) db.exec('PRAGMA query_only = 1');
+    const open = saver.connection.bind(saver);
+    saver.connection = (threadId, create) => {
+      const db = open(threadId, create);
+      db?.exec('PRAGMA query_only = 1');
+      return db;
+    };
   };
 
-  /** The `thread_id` stored for a conversation, read by a SEPARATE NODE PROCESS over the file. */
+  /**
+   * The `thread_id` stored for a conversation, read by a SEPARATE NODE PROCESS over the store's
+   * index.
+   */
   const threadIdInNewProcess = (dbPath: string, conversationId: number): string | null => {
     const source = `
       const { DatabaseSync } = require('node:sqlite');
@@ -233,7 +250,8 @@ describe('GS2-20: a checkpoint write that fails mid-session', () => {
       process.stdout.write(JSON.stringify(row === undefined ? 'NO-SUCH-ROW' : row.thread_id ?? null));
       db.close();
     `;
-    const out = execFileSync(process.execPath, ['-e', source, dbPath, String(conversationId)], {
+    const indexPath = historyStorePaths(dbPath).index;
+    const out = execFileSync(process.execPath, ['-e', source, indexPath, String(conversationId)], {
       encoding: 'utf8',
     });
     return JSON.parse(out) as string | null;
@@ -391,9 +409,14 @@ describe('GS2-20: a session ended by a signal still releases the database', () =
     rmSync(dir, { recursive: true, force: true });
   });
 
-  /** The connection behind a durable checkpointer, to ask directly whether it is still open. */
+  /**
+   * The connection behind a durable checkpointer's thread, to ask directly whether it is still
+   * open. GS2-121 — the saver holds one per thread file, opened by the first write.
+   */
   const connection = (checkpointer: SessionCheckpointer): DatabaseSync =>
-    (checkpointer.saver as unknown as { db: DatabaseSync }).db;
+    (checkpointer.saver as unknown as { connections: Map<string, DatabaseSync> }).connections.get(
+      checkpointer.threadId
+    )!;
 
   /**
    * Load a FRESH copy of the module, so its "hooks already installed" latch is unset and the
@@ -429,13 +452,14 @@ describe('GS2-20: a session ended by a signal still releases the database', () =
 
       // Discriminating pair, first half: the connection is open and usable right now.
       expect(await turn(checkpointer, 'hello')).toBe('saw 1');
-      expect(() => connection(checkpointer).prepare('SELECT 1')).not.toThrow();
+      const held = connection(checkpointer);
+      expect(() => held.prepare('SELECT 1')).not.toThrow();
 
       (hooks[0] as () => void)();
 
       // Second half: after the hook runs, the handle is gone. `node:sqlite` refuses to prepare a
       // statement on a closed database, which is the same signal a win32 file lock would clear on.
-      expect(() => connection(checkpointer).prepare('SELECT 1')).toThrow(/not open/i);
+      expect(() => held.prepare('SELECT 1')).toThrow(/not open/i);
     } finally {
       for (const listener of added) process.off('exit', listener as () => void);
       checkpointer.close();

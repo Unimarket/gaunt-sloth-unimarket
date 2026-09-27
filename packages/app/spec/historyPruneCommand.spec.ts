@@ -4,7 +4,7 @@
  * A real store over a temp file; the command is driven through commander exactly as the CLI does.
  *
  * **Every invocation passes `--db <temp>`.** This command deletes rows and runs a VACUUM, so an
- * invocation without it would resolve to the developer's own `~/.gsloth/history.db` — the file the
+ * invocation without it would resolve to the developer's own `~/.gsloth/history.db` — the store the
  * root vitest global-setup guard fingerprints. The dry-run default is the second layer of that: a
  * prune removes nothing until `--yes`.
  */
@@ -12,7 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import {
+  checkpointThreadIds,
+  countRows,
+  storeSizeOnDisk,
+} from '../../core/spec/fixtures/historyStoreFiles.mjs';
 import { Command } from 'commander';
 
 const startSessionMock = vi.hoisted(() => vi.fn());
@@ -119,14 +123,8 @@ describe('gth history prune (GS2-107)', () => {
     return id;
   };
 
-  const threadsInStore = (): string[] => {
-    const db = new DatabaseSync(dbPath);
-    const rows = db
-      .prepare(`SELECT DISTINCT thread_id FROM checkpoints ORDER BY thread_id`)
-      .all() as Record<string, unknown>[];
-    db.close();
-    return rows.map((r) => String(r.thread_id));
-  };
+  /** Every thread holding a checkpoint, read off the store's thread files (GS2-121). */
+  const threadsInStore = (): string[] => checkpointThreadIds(dbPath) as string[];
 
   /**
    * GS2-108 — a thread holding pending writes with no checkpoint. `put` is fail-soft: a dropped
@@ -140,10 +138,10 @@ describe('gth history prune (GS2-107)', () => {
     bytes = 50_000
   ): Promise<void> => {
     const { openHistoryStore } = await import('@gaunt-sloth/core/history/historyStore.js');
-    const { openCheckpointSaver } = await import('@gaunt-sloth/core/history/checkpointSaver.js');
+    const { openThreadDb } = await import('@gaunt-sloth/core/history/historyFiles.js');
     openHistoryStore(dbPath, { create: true })!.close();
-    openCheckpointSaver(dbPath)!.close();
-    const db = new DatabaseSync(dbPath);
+    // GS2-121 — the thread's own file, created the way the saver creates it.
+    const db = openThreadDb(dbPath, threadId, { create: true })!;
     db.prepare(
       `INSERT OR REPLACE INTO checkpoint_writes
        (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
@@ -157,14 +155,8 @@ describe('gth history prune (GS2-107)', () => {
     addPendingWrite(threadId, 'ckpt-gone', bytes);
 
   /** Pending-write rows a thread still holds, read off the store rather than off an output line. */
-  const writeRowsFor = (threadId: string): number => {
-    const db = new DatabaseSync(dbPath);
-    const row = db
-      .prepare(`SELECT COUNT(*) AS n FROM checkpoint_writes WHERE thread_id = ?`)
-      .get(threadId) as Record<string, unknown>;
-    db.close();
-    return Number(row.n);
-  };
+  const writeRowsFor = (threadId: string): number =>
+    countRows(dbPath, 'checkpoint_writes', threadId) as number;
 
   it('refuses to guess a bound, and removes nothing', async () => {
     await seed({ threadId: 't-old', ageDays: 400 });
@@ -207,14 +199,15 @@ describe('gth history prune (GS2-107)', () => {
   it('the file gets smaller — the VACUUM is what gives the space back', async () => {
     await seed({ threadId: 't-bulk', ageDays: 90, checkpoints: 40, payload: 20_000 });
     await seed({ threadId: 't-keep', ageDays: 1, checkpoints: 1, payload: 100 });
-    const before = statSync(dbPath).size;
+    // GS2-121 — the store is a directory, so its size is every file in it.
+    const before = storeSizeOnDisk(dbPath);
     expect(before).toBeGreaterThan(500_000);
 
     await run('prune', '--older-than', '30', '--yes', '--db', dbPath);
 
-    const after = statSync(dbPath).size;
+    const after = storeSizeOnDisk(dbPath);
     expect(after).toBeLessThan(before / 2);
-    expect(output()).toContain('after VACUUM');
+    expect(output()).toContain('Store on disk:');
     expect(threadsInStore()).toEqual(['t-keep']);
   });
 
@@ -225,11 +218,7 @@ describe('gth history prune (GS2-107)', () => {
     await run('prune', '--keep-last', '2', '--yes', '--db', dbPath);
     expect(threadsInStore()).toEqual(['t1', 't2']);
     // Whole, not truncated: the kept conversations still hold every checkpoint they had.
-    const db = new DatabaseSync(dbPath);
-    expect(
-      db.prepare(`SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = 't1'`).get()
-    ).toMatchObject({ n: 3 });
-    db.close();
+    expect(countRows(dbPath, 'checkpoints', 't1')).toBe(3);
   });
 
   it('reclaims an unaddressable thread alongside, and says so', async () => {

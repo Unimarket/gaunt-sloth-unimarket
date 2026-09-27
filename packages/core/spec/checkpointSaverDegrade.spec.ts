@@ -26,6 +26,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { countRows, openThreadFile, threadFiles } from './fixtures/historyStoreFiles.mjs';
 import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { tool } from '@langchain/core/tools';
@@ -151,29 +152,47 @@ class RecordingModel extends BaseChatModel {
 type FailureMode = 'putWrites-only' | 'put-only' | 'both';
 const FAILURE_MODES: readonly FailureMode[] = ['putWrites-only', 'put-only', 'both'];
 
-/** The saver's own connection — the one the failure has to reach. White-box, like `.db` elsewhere. */
-const connectionOf = (saver: unknown): DatabaseSync => (saver as { db: DatabaseSync }).db;
+/**
+ * Run `sql` on every connection the saver holds and on every one it opens from now on — the
+ * connections the failure has to reach. GS2-121: the saver holds one connection per thread file, so
+ * there is no single handle to reach. White-box, like the saver's private state elsewhere.
+ */
+function onEveryConnection(saver: unknown, sql: string): void {
+  const inner = saver as {
+    connections: Map<string, DatabaseSync>;
+    connection(threadId: string, create: boolean): DatabaseSync | undefined;
+  };
+  for (const db of inner.connections.values()) db.exec(sql);
+  const open = inner.connection.bind(inner);
+  inner.connection = (threadId, create) => {
+    const db = open(threadId, create);
+    db?.exec(sql);
+    return db;
+  };
+}
 
 /** Make the saver's writes fail in `mode`, leaving reads working. */
 function armFailure(saver: unknown, mode: FailureMode): void {
-  const db = connectionOf(saver);
   if (mode === 'both') {
-    db.exec('PRAGMA query_only = 1');
+    onEveryConnection(saver, 'PRAGMA query_only = 1');
     return;
   }
   const table = mode === 'put-only' ? 'checkpoints' : 'checkpoint_writes';
-  db.exec(
-    `CREATE TRIGGER gs2_117_fail BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT, 'injected'); END`
+  onEveryConnection(
+    saver,
+    `CREATE TRIGGER IF NOT EXISTS gs2_117_fail BEFORE INSERT ON ${table} BEGIN SELECT RAISE(ABORT, 'injected'); END`
   );
 }
 
-/** Rows in a table, counted over a SEPARATE connection so the file, not the saver, answers. */
-function countRows(dbPath: string, table: 'checkpoints' | 'checkpoint_writes'): number {
-  const audit = new DatabaseSync(dbPath);
-  try {
-    return Number((audit.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
-  } finally {
-    audit.close();
+/** Drop the injected trigger from every thread file in the store, over separate connections. */
+function disarmFailure(dbPath: string): void {
+  for (const { path } of threadFiles(dbPath)) {
+    const db = new DatabaseSync(path);
+    try {
+      db.exec('DROP TRIGGER IF EXISTS gs2_117_fail');
+    } finally {
+      db.close();
+    }
   }
 }
 
@@ -185,7 +204,7 @@ function countRows(dbPath: string, table: 'checkpoints' | 'checkpoint_writes'): 
 function threadIdInNewProcess(dbPath: string, conversationId: number): string | null {
   const source = `
     const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(process.argv[1]);
+    const db = new DatabaseSync(require('node:path').join(process.argv[1], 'index.db'));
     const row = db.prepare('SELECT thread_id FROM conversations WHERE id = ?').get(Number(process.argv[2]));
     process.stdout.write(JSON.stringify(row === undefined ? 'NO-SUCH-ROW' : row.thread_id ?? null));
     db.close();
@@ -353,8 +372,9 @@ describe('GS2-117: a checkpoint write that fails mid-run does not change what th
       // carries is the pending interrupt, so the failure is aimed at exactly that write.
       const failures: unknown[] = [];
       const saver = openSaver(failures);
-      connectionOf(saver).exec(
-        `CREATE TRIGGER gs2_117_fail BEFORE INSERT ON checkpoint_writes
+      onEveryConnection(
+        saver,
+        `CREATE TRIGGER IF NOT EXISTS gs2_117_fail BEFORE INSERT ON checkpoint_writes
            WHEN NEW.channel = '__interrupt__' BEGIN SELECT RAISE(ABORT, 'injected'); END`
       );
       const model = new RecordingModel();
@@ -552,7 +572,7 @@ describe('GS2-117: a checkpoint write that fails mid-run does not change what th
       expect(await say(runner, 'look up the code')).toContain(`looked it up: ${SECRET}`);
       saver.close();
 
-      const audit = new DatabaseSync(dbPath);
+      const audit = openThreadFile(dbPath, 't1');
       const rows = audit
         .prepare(`SELECT value FROM checkpoint_writes WHERE channel = 'messages'`)
         .all() as { value: Uint8Array }[];
@@ -713,7 +733,7 @@ describe('GS2-117: a checkpoint write that fails mid-run does not change what th
           {}
         );
         expect(failures).toHaveLength(1);
-        connectionOf(saver).exec('DROP TRIGGER gs2_117_fail');
+        disarmFailure(dbPath);
         expect(saver.reclaimUnresumableThreads({ now: far() }).threadCount).toBe(0);
 
         const control = openSaver();

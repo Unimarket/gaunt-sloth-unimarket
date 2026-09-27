@@ -452,6 +452,11 @@
       "arity": 0
     },
     {
+      "name": "IndexRebuildSummary",
+      "file": "history/historyFiles.d.ts",
+      "arity": 0
+    },
+    {
       "name": "LLMConfig",
       "file": "config/types.d.ts",
       "arity": 0

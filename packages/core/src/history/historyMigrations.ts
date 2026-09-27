@@ -285,12 +285,32 @@ function upgradeLegacyStore(db: DatabaseSync): void {
         String(c.name)
       )
     );
+  // Every column the split copies, added where an older file lacks it, so the copy can name them
+  // all. Only `conversation_id` was ever added by an ALTER in a released store; the rest are here so
+  // a hand-built or partial file splits instead of failing the whole open.
   const sessionCols = columnsOf('sessions');
-  if (!sessionCols.has('conversation_id')) {
-    db.exec(`ALTER TABLE sessions ADD COLUMN conversation_id INTEGER`);
+  for (const [column, type] of [
+    ['project', 'TEXT'],
+    ['command', 'TEXT'],
+    ['model', 'TEXT'],
+    ['prompt', 'TEXT'],
+    ['response', 'TEXT'],
+    ['tokens_input', 'INTEGER'],
+    ['tokens_output', 'INTEGER'],
+    ['cost_usd', 'REAL'],
+    ['tools', 'TEXT'],
+    ['duration_ms', 'INTEGER'],
+    ['conversation_id', 'INTEGER'],
+  ] as const) {
+    if (!sessionCols.has(column)) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN ${column} ${type}`);
+    }
   }
   const conversationCols = columnsOf('conversations');
   for (const [column, type] of [
+    ['project', 'TEXT'],
+    ['command', 'TEXT'],
+    ['model', 'TEXT'],
     ['thread_id', 'TEXT'],
     ['grants', 'TEXT'],
     ['run_id', 'TEXT'],

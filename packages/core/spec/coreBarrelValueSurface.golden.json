@@ -522,6 +522,10 @@
       "kind": "function"
     },
     {
+      "name": "loadConfiguredHistoryDbPath",
+      "kind": "function"
+    },
+    {
       "name": "loadConfiguredTui",
       "kind": "function"
     },
@@ -563,6 +567,10 @@
     },
     {
       "name": "readConversationGrantsSafe",
+      "kind": "function"
+    },
+    {
+      "name": "rebuildHistoryIndexSafe",
       "kind": "function"
     },
     {

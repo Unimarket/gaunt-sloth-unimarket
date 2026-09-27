@@ -156,7 +156,7 @@ describe('announceResumeHint', () => {
     });
     const [[title, lines]] = vi.mocked(consoleUtils.displayNotice).mock.calls;
     expect(title).toContain('the run stopped at a tool call that was never answered');
-    expect(lines).toEqual(['Conversation #7.', 'History file: /tmp/hint-spec/history.db']);
+    expect(lines).toEqual(['Conversation #7.', 'History store: /tmp/hint-spec/history.db']);
   });
 });
 

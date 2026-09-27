@@ -332,6 +332,9 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
   /** GS2-121 — one connection per thread file this saver has opened, held until {@link close}. */
   private readonly connections = new Map<string, DatabaseSync>();
 
+  /** Set by {@link close}; from then on every call that needs a file fails. */
+  private closed = false;
+
   private onWriteFailure: (error: unknown) => void;
 
   /**
@@ -375,6 +378,9 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
    * Throws when the file cannot be opened or migrated; a writer turns that into a failed write.
    */
   private connection(threadId: string, create: boolean): DatabaseSync | undefined {
+    // A closed saver stays closed: reopening a file here would leave a handle nobody releases,
+    // which on win32 blocks the file from being deleted or replaced.
+    if (this.closed) throw new Error('The checkpoint saver is closed.');
     const held = this.connections.get(threadId);
     if (held) {
       // Most recently used last, so the eviction below closes the one idle longest.
@@ -439,6 +445,7 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
    * saver answers no read from memory that it could not answer from disk.
    */
   close(): void {
+    this.closed = true;
     this.mirror.clear();
     for (const threadId of [...this.connections.keys()]) this.release(threadId);
   }

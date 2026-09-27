@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { indexPath } from '../../core/spec/fixtures/historyStoreFiles.mjs';
 import { Command } from 'commander';
 
 const consoleMock = vi.hoisted(() => ({
@@ -133,8 +134,9 @@ describe('gth history show <id> — one parser, exact match (GS2-106)', () => {
   });
 
   it('a row written before run ids existed still resolves by its integer', async () => {
-    // The pre-GS2-106 conversations table: no run_id column. The migration adds it on open, and
-    // the row keeps run_id NULL — it is reachable by its integer only.
+    // The pre-GS2-106 conversations table: no run_id column, in a single-file store from before
+    // GS2-121. The first open splits it and the migration adds the column, and the row keeps
+    // run_id NULL — it is reachable by its integer only.
     const legacy = new DatabaseSync(dbPath);
     legacy.exec(`
       CREATE TABLE conversations (
@@ -173,7 +175,7 @@ describe('gth history show <id> — one parser, exact match (GS2-106)', () => {
     expect(consoleMock.displayInfo).toHaveBeenCalledWith('Conversation #5:');
     expect(printed()).toContain('legacy prompt');
 
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(indexPath(dbPath));
     try {
       expect(db.prepare(`SELECT run_id FROM conversations WHERE id = 5`).get()).toEqual({
         run_id: null,

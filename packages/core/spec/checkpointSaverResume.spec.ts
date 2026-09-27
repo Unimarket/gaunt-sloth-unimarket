@@ -26,6 +26,12 @@ import { tool } from '@langchain/core/tools';
 import { createAgent } from 'langchain';
 import { z } from 'zod';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  breakSaverWrites,
+  countRows,
+  heldConnection,
+  openThreadFile,
+} from './fixtures/historyStoreFiles.mjs';
 import { openCheckpointSaver, type GthSqliteSaver } from '#src/history/checkpointSaver.js';
 
 /** The value only the tool knows. Nothing else in the graph can produce it. */
@@ -268,15 +274,9 @@ describe('GS2-20: durable checkpointer (real createAgent graph over node:sqlite)
     }
     // A second connection, so the count is read off the FILE rather than through the same object
     // whose behaviour is under test.
-    const audit = new DatabaseSync(dbPath);
+    // GS2-121 — each thread has its own file, so the count is summed over the files that hold it.
     const writeRows = (threadId: string): number =>
-      Number(
-        (
-          audit
-            .prepare(`SELECT COUNT(*) AS n FROM checkpoint_writes WHERE thread_id = ?`)
-            .get(threadId) as { n: number }
-        ).n
-      );
+      countRows(dbPath, 'checkpoint_writes', threadId);
     // Not a fixed count: the real graph writes its own pending slots as it runs, so how many rows a
     // turn leaves is the graph's business. What matters is that there ARE some, and how many survive.
     const keepBefore = writeRows('thread-keep');
@@ -289,18 +289,19 @@ describe('GS2-20: durable checkpointer (real createAgent graph over node:sqlite)
     expect(writeRows('thread-drop')).toBe(0);
     // The control: a delete that took the whole table would satisfy the line above and fail here.
     expect(writeRows('thread-keep')).toBe(keepBefore);
-    audit.close();
   });
 
-  it('sets busy_timeout on its connection, so a concurrent writer waits instead of failing', () => {
+  it('sets busy_timeout on its connection, so a concurrent writer waits instead of failing', async () => {
     const saver = openSaver(resolve(dir, 'history.db'));
+    // A thread file must exist for the saver to hold a connection to it.
+    await say(saver, 't', 'look up the code');
     // White-box, and deliberately so. `busy_timeout` is per-CONNECTION state: a second connection
     // cannot observe it, so there is no black-box read. The behavioural alternative — hold a write
     // lock elsewhere and prove a `put` waits rather than throwing SQLITE_BUSY — cannot be written
     // in-process, because `node:sqlite` is synchronous and the statement that blocks also blocks the
     // timer that would release the lock. Reading the pragma back off the saver's own handle is the
     // only assertion available that goes red when the pragma is dropped (the default is 0).
-    const { db } = saver as unknown as { db: DatabaseSync };
+    const db = heldConnection(saver, 't') as DatabaseSync;
     expect(db.prepare(`PRAGMA busy_timeout`).get()).toEqual({ timeout: 5000 });
   });
 
@@ -451,7 +452,7 @@ describe('GS2-117: the in-memory copy behind a degrade-safe saver', () => {
   /** A saver whose durable writes all fail, so its memory is the only copy of what it is handed. */
   const openCut = (): GthSqliteSaver => {
     const saver = open();
-    (saver as unknown as { db: DatabaseSync }).db.exec('PRAGMA query_only = 1');
+    breakSaverWrites(saver);
     return saver;
   };
   const writesOf = async (saver: GthSqliteSaver, thread: string) =>
@@ -530,10 +531,10 @@ describe('GS2-117: the in-memory copy behind a degrade-safe saver', () => {
 
     // The latest read seeded memory, pending writes included: with the rows gone from the file and
     // every write failing, the thread still answers.
-    const audit = new DatabaseSync(dbPath);
+    const audit = openThreadFile(dbPath, 't');
     audit.exec(`DELETE FROM checkpoints; DELETE FROM checkpoint_writes;`);
     audit.close();
-    (reader as unknown as { db: DatabaseSync }).db.exec('PRAGMA query_only = 1');
+    breakSaverWrites(reader);
     const seeded = await reader.getTuple(at('t'));
     expect(seeded?.checkpoint.id).toBe('cp-2');
     expect(seeded?.parentConfig?.configurable?.checkpoint_id).toBe('cp-1');

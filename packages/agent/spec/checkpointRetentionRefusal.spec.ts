@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { checkpointThreadIds } from '../../core/spec/fixtures/historyStoreFiles.mjs';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   markConversationUnresumableSafe,
@@ -68,21 +68,11 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
     return ckpt;
   };
 
-  const threadsInStore = (): string[] => {
-    const db = new DatabaseSync(dbPath);
-    const rows = db
-      .prepare(`SELECT DISTINCT thread_id FROM checkpoints ORDER BY thread_id`)
-      .all() as Record<string, unknown>[];
-    db.close();
-    return rows.map((r) => String(r.thread_id));
-  };
+  /** Every thread holding a checkpoint, read off the store's thread files (GS2-121). */
+  const threadsInStore = (): string[] => checkpointThreadIds(dbPath) as string[];
 
-  const unaddressable = (): string[] => {
-    const db = new DatabaseSync(dbPath);
-    const found = findUnaddressableThreads(db, { includeWithinGrace: true });
-    db.close();
-    return found.sort();
-  };
+  const unaddressable = (): string[] =>
+    findUnaddressableThreads(dbPath, { includeWithinGrace: true }).sort();
 
   it('CLASS 1 — a thread no conversation row names cannot be reached by any id, and the store agrees', async () => {
     const ckpt = durable();
@@ -172,10 +162,8 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
     await checkpoint(ckpt.saver, 'thread-live', old);
     await checkpoint(ckpt.saver, 'thread-orphan', old);
 
-    const db = new DatabaseSync(dbPath);
     // Both threads are equally old, so only the predicate separates them.
-    expect(findUnaddressableThreads(db, {})).toEqual(['thread-orphan']);
-    db.close();
+    expect(findUnaddressableThreads(dbPath, {})).toEqual(['thread-orphan']);
 
     expect(
       (

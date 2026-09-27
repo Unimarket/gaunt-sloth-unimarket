@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { indexPath } from '../../core/spec/fixtures/historyStoreFiles.mjs';
 import { Command } from 'commander';
 import { AIMessage, HumanMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -142,7 +143,7 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
   };
 
   const sql = <T = Record<string, unknown>>(query: string, ...params: (string | number)[]): T[] => {
-    const db = new DatabaseSync(dbPath);
+    const db = new DatabaseSync(indexPath(dbPath));
     try {
       return db.prepare(query).all(...params) as T[];
     } finally {
@@ -246,7 +247,7 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
         const here = await askFirst();
         initConfigMock.mockImplementation(async () => configAt(resolve(dir, 'other.db')));
         await gth('ask', 'elsewhere');
-        const other = new DatabaseSync(resolve(dir, 'other.db'));
+        const other = new DatabaseSync(indexPath(resolve(dir, 'other.db')));
         const elsewhere = other.prepare(`SELECT id, run_id FROM conversations`).get() as {
           id: number;
           run_id: string;
@@ -265,7 +266,7 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
 
       it(`${verb}: a stale run id, from a database since deleted and recreated`, async () => {
         const stale = await askFirst('before the database was recreated');
-        rmSync(dbPath, { force: true });
+        rmSync(dbPath, { recursive: true, force: true });
         rmSync(`${dbPath}-wal`, { force: true });
         rmSync(`${dbPath}-shm`, { force: true });
         const fresh = await askFirst('after');
