@@ -13,8 +13,9 @@
  *   raw-write <file>            one write on a raw connection with busy_timeout 0 (the control)
  *   split <legacyFile>          split a single-file store
  *   slurp <legacyFile>          the control for `split`: read every checkpoint into the JS heap
- *   guard <split|none>          the vitest guard's setup, optionally a split of HOME's store, then
- *                               its teardown; reports whether the teardown objected
+ *   guard <split|record|none>   the vitest guard's setup, then a split of HOME's store, a turn
+ *                               recorded into it, or nothing, then the guard's teardown; reports
+ *                               whether the teardown objected
  */
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
@@ -80,6 +81,12 @@ if (mode === 'put') {
   if (action === 'split') {
     const { splitLegacyStore } = await import(dist('history/historyMigrations.js'));
     splitLegacyStore(join(homedir(), '.gsloth', 'history.db'));
+  } else if (action === 'record') {
+    // A write deep inside a store that is already a directory: a new record file under threads/.
+    const { openHistoryStore } = await import(dist('history/historyStore.js'));
+    const store = openHistoryStore(join(homedir(), '.gsloth', 'history.db'));
+    store.record({ command: 'ask', prompt: 'p', response: 'r' });
+    store.close();
   }
   try {
     guard.teardown();

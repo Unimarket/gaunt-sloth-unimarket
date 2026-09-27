@@ -538,6 +538,14 @@ describe('GS2-121 — the split history store', () => {
       expect(statSync(join(home, '.gsloth', 'history.db')).isDirectory()).toBe(true);
     });
 
+    it('objects to a write deep inside a store that is already a directory', async () => {
+      // Split first, outside the guard's window, so the only change it can see is the new file.
+      const { splitLegacyStore } = await import('#src/history/historyMigrations.js');
+      expect(splitLegacyStore(join(home, '.gsloth', 'history.db'))).toBe(true);
+      const report = reportOf(await runChild(['guard', 'record'], { env: envFor() }));
+      expect(report.objected).toBe(true);
+    });
+
     it('CONTROL: stays quiet when nothing touches it', async () => {
       const report = reportOf(await runChild(['guard', 'none'], { env: envFor() }));
       expect(report.objected).toBe(false);
