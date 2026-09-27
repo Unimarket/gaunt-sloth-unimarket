@@ -1237,6 +1237,14 @@ export function buildRaterPrompt(
      * unit suite's direct calls) builds exactly the prompt it built before.
      */
     carved?: boolean;
+    /**
+     * [[EXT-199]] — the resolved working directory of the shell command, when `cwd` was specified.
+     */
+    cwd?: string;
+    /**
+     * [[EXT-199]] — the project root (startup work directory), attached when `cwd` is outside the project.
+     */
+    projectDir?: string;
   }
 ): { system: string; user: string } {
   const normalized = foldHomePath(normalizeCommand(command), options?.home);
@@ -1268,6 +1276,13 @@ export function buildRaterPrompt(
 
   const userLines = [
     'Evaluate the following shell command and return a structured safety verdict.',
+    ...(options?.cwd
+      ? [
+          options.projectDir
+            ? `Working directory: ${options.cwd} (outside project: ${options.projectDir})`
+            : `Working directory: ${options.cwd}`,
+        ]
+      : []),
     '',
     '<command_to_evaluate>',
     fencedCommand,
@@ -1399,6 +1414,10 @@ export async function rateShellCommand(
      * changes and why it changes both halves of the prompt.
      */
     carved?: boolean;
+    /** [[EXT-199]] — resolved working directory when cwd was supplied. */
+    cwd?: string;
+    /** [[EXT-199]] — project root when cwd is outside the project. */
+    projectDir?: string;
     /**
      * [[TUI-C27]] — the sink for the diagnostic record of THIS call, handed over **at the send
      * site**, carrying the prompt strings that are about to be sent.
@@ -1436,6 +1455,8 @@ export async function rateShellCommand(
     home: options?.home,
     negotiable: options?.negotiable,
     carved: options?.carved,
+    cwd: options?.cwd,
+    projectDir: options?.projectDir,
   });
 
   // [[TUI-C27]] — the record is built from the strings that are about to be sent and handed over

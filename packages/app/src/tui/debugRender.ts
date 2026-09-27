@@ -250,6 +250,7 @@ const AUTO_TAB_DESCRIPTION =
  */
 const STAGE_LABELS: Record<ApprovalDecidingStage, string> = {
   'not-gated': 'the rung in force does not gate this tool',
+  'invalid-cwd': 'the requested working directory does not exist or is not a directory',
   'deny-list': 'a declared deny entry (or an earlier "always reject")',
   bypass: 'nothing — the gate is off for this session',
   'hardline-floor': 'the deterministic hardline floor, before any rating',

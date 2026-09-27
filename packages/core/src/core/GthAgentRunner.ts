@@ -152,7 +152,8 @@ import {
 } from '#src/core/approvals/toolAnnotationSources.js';
 import { resolveRaterModel } from '#src/core/shell/raterModel.js';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { env } from '#src/utils/systemUtils.js';
+import { env, getStartupWorkDir } from '#src/utils/systemUtils.js';
+import { resolveShellCwd } from '#src/core/shell/cwd.js';
 import { getGslothConfigWritePath } from '#src/utils/fileUtils.js';
 import { SHELL_ALLOWLIST_FILE, SHELL_DENYLIST_FILE } from '#src/constants.js';
 import { enhanceVertexUnauthorizedMessage } from '#src/utils/vertexaiUtils.js';
@@ -1926,6 +1927,28 @@ export class GthAgentRunner {
       if (defect) record.parserUnresolved = defect;
     }
 
+    // [[EXT-199]] — validate and resolve cwd if provided for a shell command.
+    // If nonexistent or non-directory, refuse immediately: runs nothing and prompts nothing.
+    let resolvedCwd: string | undefined;
+    let isOutsideProject = false;
+    let startupWorkDir = getStartupWorkDir();
+
+    if (isShellCommand && tool.args?.cwd !== undefined) {
+      const res = resolveShellCwd(
+        typeof tool.args.cwd === 'string' ? tool.args.cwd : ''
+      );
+      if (res.kind === 'refused') {
+        // Refusal: nonexistent or non-directory cwd runs nothing.
+        return this.stage(record, 'invalid-cwd', {
+          type: 'reject',
+          message: `Refused: ${res.message}`,
+        });
+      }
+      resolvedCwd = res.cwd;
+      isOutsideProject = res.isOutsideProject;
+      startupWorkDir = res.startupWorkDir;
+    }
+
     // ONE subject and ONE annotation source per decision, shared by the rule matcher and the
     // §4.7.3 floor below. Building a second source for the floor would let a `hint` entry and the
     // floor read different effective values for the same call — the two-derivations-disagreeing
@@ -2084,7 +2107,12 @@ export class GthAgentRunner {
 
     // (4) Approve from the allow list without prompting. It ALWAYS wins over the rater — a
     // human-trusted call shouldn't pay for an LLM call on every variant — but never over escalate.
-    const allowlistApplies = approvals.rung !== 'bypass' && escalatedBy === undefined;
+    // [[EXT-199]] — Out-of-project cwd ALWAYS asks for confirmation at manual, write, assisted,
+    // and auto (Ruling, Andrew, 2026-09-27), even when a grant or allow rule would otherwise
+    // approve the command.
+    // Inside the project, a grant for `pnpm test` applies in every subdirectory of the project.
+    const allowlistApplies =
+      approvals.rung !== 'bypass' && escalatedBy === undefined && !isOutsideProject;
     let safetyVerdict: ShellSafetyVerdict | undefined;
     if (allowlistApplies && rule?.action === 'allow') {
       record.ruleMatch = {
@@ -2101,7 +2129,15 @@ export class GthAgentRunner {
       // Attributed once, before the call, for the reason the rater path below is: the tripwire's
       // own `attack` arm throws, and a second writer on the return would make this one unfalsifiable.
       record.stage = 'allow-tripwire';
-      const verdict = await this.rateCommand(command, { allowMatched: true }, record);
+      const verdict = await this.rateCommand(
+        command,
+        {
+          allowMatched: true,
+          cwd: resolvedCwd,
+          projectDir: isOutsideProject ? startupWorkDir : undefined,
+        },
+        record
+      );
       const tripwire = mapAllowMatchedVerdictToAction(verdict);
       if (tripwire.action === 'approve') {
         return { type: 'approve', scope: 'session' };
@@ -2222,6 +2258,8 @@ export class GthAgentRunner {
             // what decides; on a carved command both are backwards, and on this one command the
             // rater's assessment really is the last line.
             carved: carvedHosts.length > 0,
+            cwd: resolvedCwd,
+            projectDir: isOutsideProject ? startupWorkDir : undefined,
           },
           record
         );
@@ -2329,6 +2367,12 @@ export class GthAgentRunner {
             // round should replay as its own earlier turn.
             alignment = undefined;
           }
+        }
+        if (isOutsideProject && action !== 'halt') {
+          // Ruling (Andrew, 2026-09-27): Out-of-project cwd always requires a confirmation dialog
+          // at manual, write, assisted, and auto.
+          // Rater-based handling (including auto-negotiation) is deferred to EXT-200.
+          action = 'escalate';
         }
         if (action === 'approve') {
           // [[EXT-106]] §4.6 — **a carved command that RUNS is announced.** The carve-out removes
@@ -2695,6 +2739,8 @@ export class GthAgentRunner {
       ...(denyPreview ? { denyPreview } : {}),
       ...(denySummary ? { denySummary } : {}),
       ...(negotiationRounds.length > 0 ? { negotiationRounds, negotiationAttempts } : {}),
+      ...(resolvedCwd ? { cwd: resolvedCwd } : {}),
+      ...(isOutsideProject ? { projectDir: startupWorkDir } : {}),
     };
     const reply = await this.toolApprovalCallback(pending);
     // [[TUI-C27]] — a person was reached and answered. The STAGE stays whatever decided to ask
@@ -2798,6 +2844,10 @@ export class GthAgentRunner {
        * report and nothing in the prompt to correct.
        */
       carved?: boolean;
+      /** [[EXT-199]] — resolved working directory when cwd was supplied. */
+      cwd?: string;
+      /** [[EXT-199]] — project root when cwd is outside the project. */
+      projectDir?: string;
     },
     /** [[TUI-C27]] — the decision's record; the rating attaches itself to it at the send site. */
     record: ApprovalDecisionCapture
@@ -2819,6 +2869,8 @@ export class GthAgentRunner {
           home: env?.HOME,
           negotiable: opts.negotiable,
           carved: opts.carved,
+          cwd: opts.cwd,
+          projectDir: opts.projectDir,
           // [[TUI-C27]] — the sink fires BEFORE the model is invoked, with the prompt that is about
           // to be sent, so the record carries what the rater was SHOWN rather than a later
           // re-render of it. Assigning it here (rather than pushing a finished record afterwards)

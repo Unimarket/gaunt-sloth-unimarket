@@ -637,6 +637,15 @@ export function approvalRequestRows(
   // than explanation, and identity is what has to survive a long block above it.
   push('warn', `${approvalPromptHeader(pending)}:`);
 
+  // [[EXT-199]] — the resolved cwd, and both directories when outside the project.
+  if (pending.cwd) {
+    if (pending.projectDir) {
+      push('warn', `Working directory: ${pending.cwd} (outside project: ${pending.projectDir})`);
+    } else {
+      push('chrome', `Working directory: ${pending.cwd}`);
+    }
+  }
+
   // The call itself. Framed with the site extraction, which is what puts a command's substitution
   // and composition boundaries — the decision-relevant positions in it — above the body.
   const framedCall = frameUntrustedCommand(approvalCallText(pending), { width });

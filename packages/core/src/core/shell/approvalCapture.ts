@@ -87,6 +87,7 @@ export const APPROVAL_CAPTURE_MAX = 50;
  */
 export type ApprovalDecidingStage =
   | 'not-gated'
+  | 'invalid-cwd'
   | 'deny-list'
   | 'bypass'
   | 'hardline-floor'

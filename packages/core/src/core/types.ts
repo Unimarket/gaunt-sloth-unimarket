@@ -465,6 +465,16 @@ export interface PendingToolInterrupt {
    */
   escalatedBy?: string;
   /**
+   * [[EXT-199]] — the resolved working directory for a shell command, when `cwd` was specified.
+   * Named in the approval dialog and what the rater sees.
+   */
+  cwd?: string;
+  /**
+   * [[EXT-199]] — the project root (session startup work directory) attached when `cwd` is
+   * outside the project, so the approval dialog and rater can name both directories.
+   */
+  projectDir?: string;
+  /**
    * EXT-71 §6 — **what a sticky choice will store**, rendered in the object form the user would
    * write in a config file, e.g. `{ "type": "shell", "matcher": "exact", "pattern": "npm test" }`.
    * The menu MUST show this at the moment of the choice, on every surface: the user is shown the
