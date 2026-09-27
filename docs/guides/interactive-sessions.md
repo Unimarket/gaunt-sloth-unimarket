@@ -220,9 +220,9 @@ yours: `/clear` and start fresh, or ask for something narrower.
 
 #### When a per-minute quota is exhausted
 
-When calling Google Gemini models on tier 1 or tier 2 keys, a turn can hit the provider's
-per-minute token quota (`429 RESOURCE_EXHAUSTED`). When the provider names a short wait
-(under 90 seconds), the session announces the wait and pauses before retrying rather than ending
+When calling Google Gemini models through the Gemini API on a low-tier key, a turn can hit the
+provider's per-minute token quota (`429 RESOURCE_EXHAUSTED`). When the provider names a short wait
+(90 seconds or less), the session announces the wait and pauses before retrying rather than ending
 with an error:
 
 ```
