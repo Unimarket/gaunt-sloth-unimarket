@@ -36,6 +36,9 @@ describe('GS2-119 — which store the history commands open', () => {
   const env = (): NodeJS.ProcessEnv => {
     const out: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
     delete out.GTH_CONFIG;
+    // `pnpm test` sets INIT_CWD to the repo root, and the working directory the config walk starts
+    // from prefers it over the process cwd, so a child inheriting it would never see the project.
+    delete out.INIT_CWD;
     return out;
   };
 
