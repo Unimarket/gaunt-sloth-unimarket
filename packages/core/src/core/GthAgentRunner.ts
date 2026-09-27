@@ -177,6 +177,12 @@ import {
   retryEventTurnOnContextOverflow,
   type ContextOverflowSeamHost,
 } from '#src/core/contextOverflowSeam.js';
+import {
+  isWithinQuotaCooldownBound,
+  MAX_QUOTA_COOLDOWNS_PER_TURN,
+  quotaCooldownWaitMessage,
+  readQuotaRetryHint,
+} from '#src/core/quotaCooldown.js';
 
 /**
  * GS2-48 — how many trailing messages of the in-flight turn to hand the crash handler as the
@@ -1316,7 +1322,11 @@ export class GthAgentRunner {
    * the negotiation and re-recording the crash transcript are things a NEW user turn does, and a
    * retry is the same turn being attempted again.
    */
-  private async runTurn(messages: Message[], attempt: number): Promise<string> {
+  private async runTurn(
+    messages: Message[],
+    attempt = 0,
+    quotaCooldownAttempts = 0
+  ): Promise<string> {
     if (!this.agent || !this.config || !this.runConfig) {
       throw new Error('AgentRunner not initialized. Call init() first.');
     }
@@ -1350,7 +1360,8 @@ export class GthAgentRunner {
           const reason = this.classifyThrownAt('runner.stream-error', streamError);
           throw attachTerminationReason(
             new Error(
-              `Stream processing failed: ${streamError instanceof Error ? streamError.message : String(streamError)}`
+              `Stream processing failed: ${streamError instanceof Error ? streamError.message : String(streamError)}`,
+              streamError instanceof Error ? { cause: streamError } : undefined
             ),
             reason
           );
@@ -1459,7 +1470,21 @@ export class GthAgentRunner {
       // One seam, both paths, once each.
       const retryAfterCompaction = await this.handleContextOverflow(error, attempt);
       if (retryAfterCompaction) {
-        const answer = await this.runTurn([], attempt + 1);
+        const answer = await this.runTurn([], attempt + 1, quotaCooldownAttempts);
+        return answer;
+      }
+      // [[CFG-84]] — **the quota cooldown seam: catch, read retry hint, sleep, retry turn.**
+      //
+      // When a Gemini call fails with a 429 whose quota is per-minute, and the provider names a
+      // short wait (under 90s), wait that long, tell the user we are waiting, and re-send instead
+      // of ending the run.
+      //
+      // Measurement established that re-running the turn resumes from the checkpoint without
+      // re-running already completed tools (the EXT-160 shape).
+      // AI rater calls on the same key are out of scope for this version.
+      const retryAfterCooldown = await this.handleQuotaCooldown(error, quotaCooldownAttempts);
+      if (retryAfterCooldown) {
+        const answer = await this.runTurn([], attempt, quotaCooldownAttempts + 1);
         return answer;
       }
       // Handle agent invocation errors
@@ -3585,12 +3610,48 @@ export class GthAgentRunner {
     }
     const attemptOnce = async function* (
       this: GthAgentRunner,
-      attempt: number
+      attempt: number,
+      quotaAttempt: number
     ): AsyncGenerator<AgentStreamEvent> {
-      yield* track(agent.streamWithEvents(attempt === 0 ? messages : [], runConfig, signal));
+      yield* track(
+        agent.streamWithEvents(
+          attempt === 0 && quotaAttempt === 0 ? messages : [],
+          runConfig,
+          signal
+        )
+      );
       yield* track(this.resolveToolInterruptsWithEvents(signal));
     }.bind(this);
-    yield* retryEventTurnOnContextOverflow(attemptOnce, this.contextOverflowSeamHost());
+
+    const attemptWithCooldown = async function* (
+      this: GthAgentRunner,
+      quotaAttempt = 0
+    ): AsyncGenerator<AgentStreamEvent> {
+      try {
+        const boundAttemptOnce = (attempt: number) => attemptOnce(attempt, quotaAttempt);
+        yield* retryEventTurnOnContextOverflow(boundAttemptOnce, this.contextOverflowSeamHost());
+      } catch (error) {
+        const category =
+          terminationReasonOf(error)?.category ?? classifyThrownTermination(error).category;
+        const hint = readQuotaRetryHint(error);
+        if (
+          category === 'rate_limited' &&
+          hint &&
+          hint.perMinute &&
+          isWithinQuotaCooldownBound(hint.waitMs) &&
+          quotaAttempt < MAX_QUOTA_COOLDOWNS_PER_TURN
+        ) {
+          this.statusUpdate(StatusLevel.WARNING, quotaCooldownWaitMessage(hint.waitMs));
+          await new Promise<void>((resolve) => setTimeout(resolve, hint.waitMs));
+          this.resetTerminationReason();
+          yield* attemptWithCooldown(quotaAttempt + 1);
+          return;
+        }
+        throw error;
+      }
+    }.bind(this);
+
+    yield* attemptWithCooldown(0);
   }
 
   /**
@@ -4125,6 +4186,49 @@ export class GthAgentRunner {
   ): Promise<ConversationCompaction | null> {
     if (!this.agent || !this.config || !this.runConfig) return null;
     return handleContextOverflow(error, attempt, this.contextOverflowSeamHost());
+  }
+
+  /**
+   * CFG-84 — **the quota cooldown seam: catch, read retry hint, sleep, retry turn.**
+   *
+   * When a Gemini call fails with a 429 whose quota is per-minute, and the provider names a
+   * short wait (under 90s), wait that long, tell the user we are waiting, and re-send instead
+   * of ending the run.
+   *
+   * Measurement established that re-running the turn resumes from the checkpoint without
+   * re-running already completed tools (the EXT-160 shape).
+   * AI rater calls on the same key are out of scope for this version.
+   */
+  private async handleQuotaCooldown(
+    error: unknown,
+    quotaCooldownAttempts: number
+  ): Promise<{ waitMs: number } | null> {
+    if (!this.agent || !this.config || !this.runConfig) return null;
+
+    const category =
+      terminationReasonOf(error)?.category ?? classifyThrownTermination(error).category;
+    if (category !== 'rate_limited') {
+      return null;
+    }
+
+    const hint = readQuotaRetryHint(error);
+    if (!hint || !hint.perMinute) {
+      return null;
+    }
+
+    if (!isWithinQuotaCooldownBound(hint.waitMs)) {
+      return null;
+    }
+
+    if (quotaCooldownAttempts >= MAX_QUOTA_COOLDOWNS_PER_TURN) {
+      return null;
+    }
+
+    this.statusUpdate(StatusLevel.WARNING, quotaCooldownWaitMessage(hint.waitMs));
+    await new Promise<void>((resolve) => setTimeout(resolve, hint.waitMs));
+    this.resetTerminationReason();
+
+    return { waitMs: hint.waitMs };
   }
 
   /**

@@ -690,7 +690,12 @@ function errorText(error: unknown): string {
 
 /** The HTTP status an SDK error carries, wherever it hangs it. Undefined when there is none. */
 function httpStatus(error: unknown): number | undefined {
-  for (const holder of [error, field(error, 'response'), field(error, 'error')]) {
+  for (const holder of [
+    error,
+    field(error, 'response'),
+    field(error, 'error'),
+    field(error, 'cause'),
+  ]) {
     for (const key of ['status', 'statusCode', 'code']) {
       const value = field(holder, key);
       if (typeof value === 'number' && value >= 100 && value < 600) return value;
