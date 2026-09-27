@@ -184,7 +184,7 @@ export function readQuotaRetryHint(error: unknown): QuotaRetryHint | null {
         typeof (d as { '@type'?: string })['@type'] === 'string' &&
         (d as { '@type': string })['@type'].includes('google.rpc.')
     ) ||
-    /ai\.google\.dev|generativelanguage\.googleapis\.com|gemini/i.test(allMessages);
+    /ai\.google\.dev|generativelanguage\.googleapis.com|gemini/i.test(allMessages);
 
   if (!isGoogle) {
     return null;
