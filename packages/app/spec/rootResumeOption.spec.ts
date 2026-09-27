@@ -101,6 +101,9 @@ describe('gth --resume in front of a subcommand (real CLI definition)', () => {
    */
   describe('in a project where ask would otherwise succeed', () => {
     const FAKE_ANSWER = 'FAKE-ASK-ANSWER-GS2-20';
+    // The GS2-106 cells below start the built CLI three or four times in sequence. One start costs
+    // about 2.8 s on the Windows CI runner, so four went past vitest's 10 s default there.
+    const MULTI_SPAWN_TIMEOUT_MS = 60_000;
     let configPath: string;
 
     beforeEach(() => {
@@ -131,55 +134,63 @@ describe('gth --resume in front of a subcommand (real CLI definition)', () => {
 
     // GS2-106 through the built CLI: `ask` records conversation #1 in the throwaway HOME's history,
     // and both spellings of the flag continue it rather than opening a second one.
-    it('gth --resume <id> ask and gth ask --resume <id> both continue the recorded conversation', () => {
-      const first = runCli(['-c', configPath, 'ask', 'hello there']);
-      expect(first.status, first.output).toBe(0);
+    it(
+      'gth --resume <id> ask and gth ask --resume <id> both continue the recorded conversation',
+      () => {
+        const first = runCli(['-c', configPath, 'ask', 'hello there']);
+        expect(first.status, first.output).toBe(0);
 
-      for (const args of [
-        ['--resume', '1', '-c', configPath, 'ask', 'and again'],
-        ['-c', configPath, 'ask', '--resume', '1', 'and once more'],
-      ]) {
-        const { status, output } = runCli(args);
-        expect(status, output).toBe(0);
-        expect(output).toContain(FAKE_ANSWER);
-        expect(output).not.toContain('Cannot resume into');
-      }
-      const list = runCli(['-c', configPath, 'history', 'list']);
-      expect(list.status, list.output).toBe(0);
-      expect(list.output).toContain('#1');
-      expect(list.output).not.toContain('#2');
-    });
+        for (const args of [
+          ['--resume', '1', '-c', configPath, 'ask', 'and again'],
+          ['-c', configPath, 'ask', '--resume', '1', 'and once more'],
+        ]) {
+          const { status, output } = runCli(args);
+          expect(status, output).toBe(0);
+          expect(output).toContain(FAKE_ANSWER);
+          expect(output).not.toContain('Cannot resume into');
+        }
+        const list = runCli(['-c', configPath, 'history', 'list']);
+        expect(list.status, list.output).toBe(0);
+        expect(list.output).toContain('#1');
+        expect(list.output).not.toContain('#2');
+      },
+      MULTI_SPAWN_TIMEOUT_MS
+    );
 
     // GS2-106 — the continue hint, through the built CLI: on stderr only, naming the run id, and the
     // command it names, pasted with the placeholder filled in, continues the same conversation.
-    it('ask prints the continue hint on stderr only, and pasting it resumes the conversation', () => {
-      const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
-      delete env.INIT_CWD;
-      const spawn = (args: string[]) =>
-        spawnSync('node', [cliEntry, '--nopipe', '-c', configPath, ...args], {
-          encoding: 'utf8',
-          cwd: projectDir,
-          env,
-        });
+    it(
+      'ask prints the continue hint on stderr only, and pasting it resumes the conversation',
+      () => {
+        const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
+        delete env.INIT_CWD;
+        const spawn = (args: string[]) =>
+          spawnSync('node', [cliEntry, '--nopipe', '-c', configPath, ...args], {
+            encoding: 'utf8',
+            cwd: projectDir,
+            env,
+          });
 
-      const first = spawn(['ask', 'hello there']);
-      expect(first.status, first.stderr).toBe(0);
-      const hint = /To continue this conversation: (gth ask --resume ([0-9a-f-]{36}) "…")/.exec(
-        first.stderr
-      );
-      expect(hint, first.stderr).not.toBeNull();
-      expect(first.stdout).not.toContain('To continue this conversation');
+        const first = spawn(['ask', 'hello there']);
+        expect(first.status, first.stderr).toBe(0);
+        const hint = /To continue this conversation: (gth ask --resume ([0-9a-f-]{36}) "…")/.exec(
+          first.stderr
+        );
+        expect(hint, first.stderr).not.toBeNull();
+        expect(first.stdout).not.toContain('To continue this conversation');
 
-      const [, , runId] = hint!;
-      const again = spawn(['ask', '--resume', runId, 'a follow-up']);
-      expect(again.status, again.stderr).toBe(0);
-      expect(again.stdout).toContain(FAKE_ANSWER);
-      // The same run id again, and still one conversation.
-      expect(again.stderr).toContain(`gth ask --resume ${runId} "…"`);
-      const list = spawn(['history', 'list']);
-      expect(list.stdout).toContain('(2 turns)');
-      expect(list.stdout).not.toContain('#2');
-    });
+        const [, , runId] = hint!;
+        const again = spawn(['ask', '--resume', runId, 'a follow-up']);
+        expect(again.status, again.stderr).toBe(0);
+        expect(again.stdout).toContain(FAKE_ANSWER);
+        // The same run id again, and still one conversation.
+        expect(again.stderr).toContain(`gth ask --resume ${runId} "…"`);
+        const list = spawn(['history', 'list']);
+        expect(list.stdout).toContain('(2 turns)');
+        expect(list.stdout).not.toContain('#2');
+      },
+      MULTI_SPAWN_TIMEOUT_MS
+    );
 
     it('an id that is not on record fails by name via ask, runs nothing, and exits 1', () => {
       const { status, output } = runCli(['--resume', '9', '-c', configPath, 'ask', 'hello']);
