@@ -284,7 +284,10 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
   });
 
   describe('ACCEPTANCE (matrix): each refused cell is loud, exits 1 and runs nothing', () => {
-    const seedRow = async (over: { command: string; origin?: string }) => {
+    const seedRow = async (
+      over: { command: string; origin?: string },
+      messages: BaseMessage[] = []
+    ) => {
       const { recordSessionTurnSafe } = await import('@gaunt-sloth/core/history/recordSession.js');
       const { openCheckpointSaver } = await import('@gaunt-sloth/core/history/checkpointSaver.js');
       const threadId = `thread-${over.command}-${over.origin ?? 'direct'}`;
@@ -299,7 +302,7 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
           v: 4,
           id: `cp-${threadId}`,
           ts: new Date().toISOString(),
-          channel_values: {},
+          channel_values: messages.length > 0 ? { messages } : {},
           channel_versions: {},
           versions_seen: {},
         },
@@ -335,6 +338,32 @@ describe('GS2-106 — ask --resume and exec --resume -m', () => {
           expectRefused(1);
         });
       }
+    }
+
+    // The thread-tail cell: a direct `ask` row the matrix accepts, whose last run stopped at an
+    // approval with its tool call unanswered. Appending a message there is refused on both verbs.
+    for (const verb of ['ask', 'exec'] as const) {
+      it(`an ask row whose run stopped at an unanswered tool call → ${verb} --resume`, async () => {
+        const id = await seedRow({ command: 'ask' }, [
+          new HumanMessage('delete the build folder'),
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              { name: 'run_shell_command', args: { command: 'rm -rf build' }, id: 'c1' },
+            ],
+          }),
+        ]);
+        await gth(
+          ...(verb === 'ask'
+            ? ['ask', '--resume', String(id), 'm']
+            : ['exec', '--resume', String(id), '-m', 'm'])
+        );
+        expect(consoleMock.displayNotice).toHaveBeenCalledTimes(1);
+        const [title, lines] = consoleMock.displayNotice.mock.calls[0];
+        expect(title).toBe(`Conversation #${id} cannot be resumed`);
+        expect((lines as string[]).join(' ')).toContain('stopped at a tool call that was never');
+        expectRefused(1);
+      });
     }
   });
 
