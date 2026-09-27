@@ -384,25 +384,28 @@ export interface OutOfProjectCwd {
  * - The two paths are `value` parts labelled `Working directory` and `Project directory`, **never
  *   interpolated into the sentence.** A path can carry model-authored bytes (the agent chose the
  *   `cwd`; a symlink target or a directory name can be anything), and an `own` part is painted raw —
- *   [[EXT-115]]'s ruled constraint. The sentence instead says in words that the project is the
- *   directory the session started in, because that is what `getStartupWorkDir()` returns and it is
- *   the fact a user who launched from a subdirectory would otherwise get wrong.
- * - The remedy is worded as bringing the call **back under the project's own rules**, not as
- *   letting it run. Starting the session from a directory that contains the working directory makes
- *   the call in-project; from there it is decided like any other call, which at `manual`, on a
- *   `destructive` rating or on an `attack` may still stop — so promising more would be the same class
- *   of false remedy this branch exists to remove. `bypass` is the one thing that lifts it outright
+ *   [[EXT-115]]'s ruled constraint. No sentence says in words what the project is: the
+ *   `Project directory` row carries the true value (`getStartupWorkDir()`, which is `INIT_CWD` when
+ *   that is set, not necessarily the shell directory the user launched from), and no remedy here
+ *   depends on the reader knowing more than that value.
+ * - **The remedy is "confirm or bypass", and nothing else** (Andrew, 2026-09-27). The stop offers
+ *   running the command in a session where a person can confirm it, then {@link BYPASS_LAST_RESORT}
  *   (the runner returns before any of this for a shell call at `bypass`, and ignores an escalate
- *   entry there), so {@link BYPASS_LAST_RESORT} is named last, unchanged.
+ *   entry there, so it does lift the stop). It does NOT suggest starting the session from a
+ *   directory that contains the working directory. That would make the call in-project, but project
+ *   config is discovered by walking **up** from the launch directory (`config/loader.ts`
+ *   `walkConfigSearchDirs`, which stops at a `.git` directory, home or the root), so a session
+ *   launched from the project's parent never finds the project's config, and its `approvals.allow`
+ *   goes with it. A remedy that silently drops the rules it promises to restore is the same class of
+ *   false remedy this branch exists to remove.
  *
  * ## When an `approvals.escalate` entry ALSO matched
  *
- * Both obstacles hold independently: removing the escalate entry still leaves the out-of-project
- * escalation, and moving the session still leaves the escalate entry asking a human wherever the
- * command runs. So the combined message keeps the `Matched approvals.escalate` row and names both
- * remedies in one sentence, then `bypass` — which does lift both. The escalate branch's own
- * sentence ("Remove the escalate entry…") is not reused alone, because on its own it would promise
- * that removing the entry is enough.
+ * Both obstacles ask a person, so the remedy is the same confirm-or-bypass. The combined message
+ * keeps the `Matched approvals.escalate` row, says that entry asks a person too, and names the same
+ * remedy. It promises nothing about running unattended: removing the entry still leaves the
+ * out-of-project escalation. The escalate branch's own sentence ("Remove the escalate entry…") is
+ * not reused, because here it would promise that removing the entry is enough.
  *
  * ## `AttackHaltError` — reachable, traced
  *
@@ -416,8 +419,14 @@ export interface OutOfProjectCwd {
  *   `haltOrRunAnyway`, and with no banner wired that throws {@link AttackHaltError}.
  * Its in-project recovery ("declare it in approvals.allow … it never reaches a halt") is false for
  * such a call, because the rater runs whatever the allow list says. The out-of-project halt names
- * the directories and says to move the session first, then declare it — which is true once the
- * call is in-project, where the allow list is consulted before the rater.
+ * the directories and offers the two ways past it:
+ * - **an interactive session**, whose attack banner (`GthAgentRunner.haltOrRunAnyway`) lets a person
+ *   type `run anyway` for this one command. The banner is offered with no project check, so it
+ *   covers an out-of-project call. This is deliberately narrower than the escalation's "a session
+ *   where a person can confirm it": the ACP surface confirms escalations but never wires the
+ *   banner, so an attack there halts with nobody asked;
+ * - {@link BYPASS_LAST_RESORT}, as on every stop.
+ * Moving the session is not offered, for the config-discovery reason above.
  *
  * ## Signature
  *
@@ -437,25 +446,23 @@ function outOfProjectParts(where: OutOfProjectCwd, sentence: string): ApprovalSt
 /** [[EXT-201]] — the escalation's statement of the cause; see `outOfProjectParts`. */
 const OUT_OF_PROJECT_ESCALATION =
   `The command's working directory is outside the project, so a person must confirm it whatever ` +
-  `its rating, and approvals.allow is not consulted for it. The project is the directory this ` +
-  `session started in.`;
+  `its rating, and approvals.allow is not consulted for it.`;
 
-/** [[EXT-201]] — the escalation's remedy when no escalate entry also matched. */
-const OUT_OF_PROJECT_REMEDY =
-  `To bring this command back under the project's own rules, approvals.allow included, start ` +
-  `the session from a directory that contains its working directory.`;
+/** [[EXT-201]] — the escalation's remedy: confirm, then `bypass`; see `outOfProjectParts`. */
+const OUT_OF_PROJECT_REMEDY = `Run it in a session where a person can confirm it.`;
 
 /** [[EXT-201]] — the escalation's remedy when an escalate entry ALSO matched. */
 const OUT_OF_PROJECT_AND_ESCALATE_REMEDY =
-  `An escalate entry also matched, and it asks a human wherever the command runs. To run this ` +
-  `command unattended, start the session from a directory that contains its working directory ` +
-  `and remove the escalate entry.`;
+  `An escalate entry also matched, and it asks a person too. Run it in a session where a ` +
+  `person can confirm it.`;
 
 /** [[EXT-201]] — the halt's statement of the cause; see `outOfProjectParts`. */
 const OUT_OF_PROJECT_HALT =
   `The command's working directory is outside the project, where approvals.allow is not ` +
-  `consulted, so no allow entry can prevent this halt. The project is the directory this ` +
-  `session started in.`;
+  `consulted, so no allow entry can prevent this halt.`;
+
+/** The halt's opener, shared by the in-project and out-of-project recoveries. */
+const ATTACK_HALT_OPENER = `This is not negotiable. If this command is legitimate and you need it to run, `;
 
 /**
  * §4.2 — an `attack` outcome: the command's own **structure** evidenced compromise (§4.1.1 —
@@ -475,8 +482,9 @@ const OUT_OF_PROJECT_HALT =
  * last resort, not the answer, and the wording says so in that order.
  *
  * [[EXT-201]] — for a call whose `cwd` was outside the project the allow-list does not apply, so
- * that recovery is replaced; see `outOfProjectParts` for the trace showing this halt is reachable
- * there.
+ * that recovery is replaced by the interactive session's banner, then `bypass`; see
+ * `outOfProjectParts` for the trace showing this halt is reachable there, and why moving the
+ * session is not offered.
  */
 export class AttackHaltError extends ApprovalStopError {
   /** The rater's explanation of what the command's structure showed. */
@@ -508,17 +516,15 @@ export class AttackHaltError extends ApprovalStopError {
               {
                 kind: 'own' as const,
                 text:
-                  `This is not negotiable. If this command is legitimate and you need it to run, ` +
-                  `start the session from a directory that contains its working directory, then ` +
-                  `declare it in approvals.allow — inside the project that list is consulted ` +
-                  `before the auto-rater, so it never reaches a halt. ${BYPASS_LAST_RESORT}`,
+                  `${ATTACK_HALT_OPENER}run it in an interactive session, where the attack ` +
+                  `banner lets a person run this one command anyway. ${BYPASS_LAST_RESORT}`,
               },
             ]
           : [
               {
                 kind: 'own' as const,
                 text:
-                  `This is not negotiable. If this command is legitimate and you need it to run, declare ` +
+                  `${ATTACK_HALT_OPENER}declare ` +
                   `it in approvals.allow — that list is consulted before the auto-rater, so it never ` +
                   `reaches a halt. ${BYPASS_LAST_RESORT}`,
               },

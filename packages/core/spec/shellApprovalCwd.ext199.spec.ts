@@ -616,4 +616,52 @@ describe('EXT-199 — GthAgentRunner approval gate with cwd', () => {
     expect(halt.message).toContain('declare it in approvals.allow — that list is consulted');
     expect(halt.message).not.toContain(OUT_OF_PROJECT_CAUSE);
   });
+
+  /**
+   * [[EXT-201]] m3 — the same halt at `assisted`, with the REAL `mapVerdictToAction`, so the
+   * attack-to-halt mapping this lane's trace rests on is exercised rather than scripted. Set in the
+   * test body because `beforeEach` resets every mock implementation.
+   */
+  it('EXT-201: assisted, real verdict mapping: an out-of-project attack halts', async () => {
+    const actual = await vi.importActual<typeof import('#src/core/shell/rater.js')>(
+      '#src/core/shell/rater.js'
+    );
+    mapVerdictToActionMock.mockImplementation(actual.mapVerdictToAction);
+    rateShellCommandMock.mockResolvedValue({ outcome: 'attack', reason: 'hides what it runs' });
+
+    const runner = await makeRunner([{ command: 'cat marker.txt', cwd: outsideDir }], {
+      approvals: { mode: 'assisted' },
+    } as unknown as Partial<GthConfig>);
+
+    const error = await catchTurn(runner, 'read it');
+
+    expect(error).toBeInstanceOf(AttackHaltError);
+    const halt = error as AttackHaltError;
+    expect(executed).toHaveLength(0);
+    expect(valueOf(halt, 'Working directory')).toBe(realpathSync(outsideDir));
+    expect(halt.message).toContain(OUT_OF_PROJECT_CAUSE);
+    expect(halt.message).toContain('run it in an interactive session');
+  });
+
+  /**
+   * [[EXT-201]] — the out-of-project halt tells the reader an interactive session can get past it.
+   * That is true only because the banner is offered with no project check; this pins it.
+   */
+  it('EXT-201: an out-of-project attack is offered the banner, and run anyway runs it once', async () => {
+    const verdict = { outcome: 'attack', reason: 'hides what it runs' };
+    rateShellCommandMock.mockResolvedValue(verdict);
+    mapVerdictToActionMock.mockReturnValue({ action: 'halt', verdict });
+
+    const runner = await makeRunner([{ command: 'cat marker.txt', cwd: outsideDir }], {
+      approvals: { mode: 'auto' },
+    } as unknown as Partial<GthConfig>);
+    const banner = vi.fn(() => 'run-anyway' as const);
+    runner.setAttackHaltCallback(banner);
+
+    const error = await catchTurn(runner, 'read it');
+
+    expect(error).toBeNull();
+    expect(banner).toHaveBeenCalledTimes(1);
+    expect(executed).toEqual([{ command: 'cat marker.txt', cwd: outsideDir }]);
+  });
 });

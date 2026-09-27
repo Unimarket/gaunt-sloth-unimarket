@@ -313,8 +313,8 @@ symlinks pointing outside) always requires confirmation at `manual`, `write`, `a
 rungs, even if a matching grant exists; only `bypass` runs without prompting. `approvals.allow`
 entries and saved grants do not apply outside the project, so where there is nobody to ask such a
 command stops the run whatever it is rated, and adding an allow entry will not change that. The
-project is the directory the session started in: start the session from a directory that contains
-the one you need, or use `bypass` as a last resort. Unlike `timeoutMs`,
+stop names the working directory and the project directory. To run such a command, run it in a
+session where a person can confirm it, or use `bypass` as a last resort. Unlike `timeoutMs`,
 the fixed `run_*` commands do not accept `cwd` because they are configured statically at the
 project root.
 

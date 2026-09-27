@@ -740,8 +740,8 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
 
   const CAUSE =
     "The command's working directory is outside the project, so a person must confirm it " +
-    'whatever its rating, and approvals.allow is not consulted for it. The project is the ' +
-    'directory this session started in.';
+    'whatever its rating, and approvals.allow is not consulted for it.';
+  const CONFIRM = 'Run it in a session where a person can confirm it.';
   const BYPASS =
     'Dropping to approvals "bypass" also works, but it turns off the rater, the prompts and ' +
     'the halt for every command in the run.';
@@ -765,12 +765,7 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
       { kind: 'own', text: CAUSE },
       { kind: 'value', label: 'Working directory', text: WHERE.cwd },
       { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
-      {
-        kind: 'own',
-        text:
-          "To bring this command back under the project's own rules, approvals.allow included, " +
-          'start the session from a directory that contains its working directory.',
-      },
+      { kind: 'own', text: CONFIRM },
       { kind: 'own', text: BYPASS },
     ]);
     // The RENDERED rows, as a plain surface paints them: labels on their own rows, both
@@ -788,8 +783,7 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
       '  1 │ /tmp/elsewhere/outside',
       '  Project directory:',
       '  1 │ /tmp/elsewhere/project',
-      "To bring this command back under the project's own rules, approvals.allow included, " +
-        'start the session from a directory that contains its working directory.',
+      CONFIRM,
       BYPASS,
     ]);
     expect(error.message).not.toContain(ENTRY);
@@ -818,13 +812,42 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
       { kind: 'value', label: 'Matched approvals.escalate', text: ESCALATE },
       {
         kind: 'own',
-        text:
-          'An escalate entry also matched, and it asks a human wherever the command runs. To run ' +
-          'this command unattended, start the session from a directory that contains its working ' +
-          'directory and remove the escalate entry.',
+        text: `An escalate entry also matched, and it asks a person too. ${CONFIRM}`,
       },
       { kind: 'own', text: BYPASS },
     ]);
+    expect(error.message).not.toContain('unattended');
+  });
+
+  /**
+   * [[EXT-201]] m1 — a command the allow classifier cannot resolve has no derived entry
+   * (`shellApprovalEntryFor` returns `undefined`), which is the one input that would otherwise
+   * reach the GENERAL allow example. Out of project it must not.
+   */
+  it('offers no general allow example when no entry could be derived', () => {
+    const error = new NonInteractiveEscalationError(
+      'cat marker.txt',
+      'safe',
+      'Read-only inspection of a local text file.',
+      undefined,
+      undefined,
+      undefined,
+      SHELL,
+      WHERE
+    );
+    expect(error.parts).toEqual([
+      { kind: 'own', text: 'Approval required, but this session has no one to ask.' },
+      { kind: 'command', label: 'Command', text: 'cat marker.txt' },
+      { kind: 'value', label: 'Rating', text: 'safe' },
+      { kind: 'value', label: 'Reason', text: 'Read-only inspection of a local text file.' },
+      { kind: 'own', text: CAUSE },
+      { kind: 'value', label: 'Working directory', text: WHERE.cwd },
+      { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
+      { kind: 'own', text: CONFIRM },
+      { kind: 'own', text: BYPASS },
+    ]);
+    expect(error.message).not.toContain('"pattern": "npm test"');
+    expect(error.message).not.toContain('write each one as an explicit entry');
   });
 
   /** The in-project stop is UNCHANGED: the derived entry, then `bypass`. */
@@ -867,18 +890,16 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
         kind: 'own',
         text:
           "The command's working directory is outside the project, where approvals.allow is not " +
-          'consulted, so no allow entry can prevent this halt. The project is the directory this ' +
-          'session started in.',
+          'consulted, so no allow entry can prevent this halt.',
       },
       { kind: 'value', label: 'Working directory', text: WHERE.cwd },
       { kind: 'value', label: 'Project directory', text: WHERE.projectDir },
       {
         kind: 'own',
         text:
-          'This is not negotiable. If this command is legitimate and you need it to run, start ' +
-          'the session from a directory that contains its working directory, then declare it in ' +
-          'approvals.allow — inside the project that list is consulted before the auto-rater, so ' +
-          `it never reaches a halt. ${BYPASS}`,
+          'This is not negotiable. If this command is legitimate and you need it to run, run it ' +
+          'in an interactive session, where the attack banner lets a person run this one command ' +
+          `anyway. ${BYPASS}`,
       },
     ]);
     expect(error.outOfProject).toEqual(WHERE);

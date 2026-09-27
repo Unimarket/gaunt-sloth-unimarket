@@ -496,9 +496,9 @@ in-project grants to apply across any subdirectory. When `cwd` points outside th
 confirmation is always required across `manual`, `write`, `assisted`, and `auto` modes even if a
 matching grant exists. Allow entries and grants do not apply outside the project at all, so in a
 run with nobody to ask such a command stops the run even when it is rated `safe`; the stop names
-the working directory and the project directory. The project is the directory the session started
-in, so the fix is to start the session from a directory that contains the one the command needs,
-or to use `bypass` as a last resort.
+the working directory and the project directory. To run such a command, run it in a session where
+a person can confirm it, or use `bypass` as a last resort. If the rater calls it an `attack`, only
+an interactive session's red banner (above) or `bypass` gets past the halt.
 
 A per-command `builtInTools` object **replaces** the default set entirely, which is why
 `gth_checklist` and `gth_grep` (the two defaults) are listed explicitly — drop them and they are
