@@ -25,9 +25,12 @@ import {
 import {
   display,
   displayInfo,
+  displayNotice,
   displaySuccess,
   displayWarning,
 } from '@gaunt-sloth/core/utils/consoleUtils.js';
+import { getStringFromStdin, setExitCode } from '@gaunt-sloth/core/utils/systemUtils.js';
+import { resumeMatrixVerdict } from '@gaunt-sloth/core/history/resumeMatrix.js';
 import { statSync } from 'node:fs';
 
 /**
@@ -49,8 +52,9 @@ import { sessionConfigFor } from '#src/modules/sessionConfigs.js';
  * - `gth history list` — the most recent conversations (grouped, with turn count + timespan), the
  *   top-level unit since GS2-19 (was a flat per-turn list).
  * - `gth history show <id>` — print a whole conversation thread, all turns in order (GS2-19).
- * - `gth history resume <id>` — GS2-20: start an interactive session inside a recorded
- *   conversation, in the mode (`chat` / `code`) it was recorded under.
+ * - `gth history resume <id> [message]` — GS2-20: continue a recorded conversation as the command
+ *   it was recorded under: an interactive session for `chat` / `code`, and (GS2-106) one more `ask`
+ *   or `exec` run, with the new message, for a single-shot one.
  *
  * The first three are READ-ONLY and fail-soft: they open the store with `create: false`, so a
  * missing DB (nothing recorded yet, or history turned off) simply reports "no history yet" instead
@@ -278,26 +282,39 @@ export function historyCommand(
     });
 
   // GS2-20 — the third spelling of a resume. The mode comes from the ROW, not from the person: a
-  // conversation recorded by `gth chat` resumes as a chat session and one recorded by `gth code`
-  // as a code session, because the other mode's tools and prompt would make it a different
-  // conversation. Everything past picking the mode is `startSession` with `--resume`, so the
-  // five checks and their sentences are the seam's, made once. What is decided HERE is only what
-  // has to be decided before a session can start: is there such a row, and was it interactive.
+  // conversation recorded by `gth chat` resumes as a chat session, one recorded by `gth code` as a
+  // code session, and (GS2-106) one recorded by `gth ask` or `gth exec` runs as that command again
+  // with the new message. This spelling never switches command; `gth <command> --resume` is the one
+  // that does. Everything past picking the command is that command's own path with its resume, so
+  // the checks and their sentences are the seam's, made once. What is decided HERE is only what has
+  // to be decided before a command can start: is there such a row, and does the matrix let it be
+  // resumed at all.
+  //
+  // Every refusal here exits 1 (GS2-106): the person asked for something to run and it did not.
   history
     .command('resume')
     .description(
-      'Pick up a recorded conversation where it left off, in the mode it was recorded under'
+      'Pick up a recorded conversation where it left off, as the command it was recorded under'
     )
     .argument('<id>', 'conversation id or run id (from `history list`)')
-    .action(async (idArg: string) => {
+    .argument(
+      '[message]',
+      'the new message: required for an ask or exec conversation (or pipe it on stdin), ' +
+        'optional for chat or code'
+    )
+    .action(async (idArg: string, message: string | undefined) => {
+      const refuse = (sentence: string): void => {
+        displayWarning(sentence);
+        setExitCode(1);
+      };
       const ref = parseConversationRef(idArg);
       if (ref === null) {
-        displayWarning(`Invalid conversation id "${idArg}".`);
+        refuse(`Invalid conversation id "${idArg}".`);
         return;
       }
       const config = await initConfig(commandLineConfigOverrides);
       if (!isHistoryEnabled(config)) {
-        displayWarning(
+        refuse(
           'History is off: `history.enabled: false` in your config turns recording off, and only ' +
             'a recorded conversation can be resumed.'
         );
@@ -309,32 +326,69 @@ export function historyCommand(
         create: false,
       });
       if (!store) {
-        displayWarning(NO_HISTORY_MESSAGE);
+        refuse(NO_HISTORY_MESSAGE);
         return;
       }
       store.close();
       // GS2-106 — resolved to the integer HERE, through the same exact-match lookup the resume seam
-      // uses, because the row's command has to be read before a session can be started for it.
+      // uses, because the row's command has to be read before a command can be started for it.
       const id = resolveConversationRefSafe(config, ref);
       const stored = id === null ? null : lookupConversationSafe(config, id);
       if (id === null || !stored) {
-        displayWarning(
+        refuse(
           `No conversation ${formatConversationRef(ref)} in the history store. Run ` +
             '`gth history list` to see the ids.'
         );
         return;
       }
-      const command = stored.summary.command;
-      const sessionConfig = sessionConfigFor(command);
-      if (!sessionConfig) {
-        displayWarning(
-          `Conversation #${id} was recorded by \`gth ${command ?? 'ask'}\`, a single-shot run. ` +
-            'Resuming a single-shot run is not supported yet. ' +
-            `\`gth history show ${id}\` prints it.`
-        );
+      // GS2-106 — the matrix is asked BEFORE the message is demanded, so a fan-out cell or a
+      // `review` row is refused for what it is rather than for a missing message. The sentence is
+      // the seam's own, so this refusal reads exactly as `ask --resume` would say it.
+      const verdict = resumeMatrixVerdict(stored.summary, 'history');
+      if (!verdict.ok) {
+        const { resumeRefusalNotice } = await import('@gaunt-sloth/agent/modules/sessionResume.js');
+        const notice = resumeRefusalNotice({
+          kind: 'not-resumable',
+          id,
+          reason: verdict.reason,
+          command: stored.summary.command,
+          ...(verdict.reason === 'fan-out' ? { origin: verdict.origin } : {}),
+        });
+        displayNotice(notice.title, [...notice.lines, 'Nothing was run.'], { tone: 'warn' });
+        setExitCode(1);
         return;
       }
-      await startSession(sessionConfig, commandLineConfigOverrides, undefined, {
+      const command = stored.summary.command;
+      if (command === 'ask' || command === 'exec') {
+        // A single-shot conversation needs something new to say: from the positional, or from
+        // stdin the way `ask` reads a pipe. It is the whole new user message either way.
+        const text = message ?? getStringFromStdin();
+        if (!text) {
+          refuse(
+            `Conversation #${id} was recorded by \`gth ${command}\`, so resuming it needs a new ` +
+              `message: \`gth history resume ${id} "…"\`, or pipe one on stdin. Nothing was run.`
+          );
+          return;
+        }
+        if (command === 'ask') {
+          const { runAskCommand } = await import('#src/commands/askCommand.js');
+          await runAskCommand(text, {}, commandLineConfigOverrides, {
+            ref: id,
+            surface: 'history',
+          });
+        } else {
+          const { runExecCommand } = await import('#src/commands/execCommand.js');
+          await runExecCommand(undefined, { message: text }, commandLineConfigOverrides, {
+            ref: id,
+            surface: 'history',
+          });
+        }
+        return;
+      }
+      // chat / code: the matrix allowed it, so there is a session config for it. The message, if
+      // any, is the session's first input, which both session commands already accept.
+      const sessionConfig = sessionConfigFor(command)!;
+      await startSession(sessionConfig, commandLineConfigOverrides, message, {
         resumeConversationId: id,
       });
     });

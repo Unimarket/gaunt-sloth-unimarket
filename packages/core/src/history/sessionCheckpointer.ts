@@ -56,6 +56,13 @@ export interface SessionCheckpointer {
    * about this.
    */
   bindConversation?(conversationId: number | undefined): void;
+  /**
+   * GS2-106 — whether a checkpoint write has failed in this session, so its conversation's link
+   * has been (or, once bound, will be) cut. A single-shot run reads it before printing its continue
+   * hint: a hint naming a conversation whose link was just cut would name an id that refuses.
+   * Optional for the same reason as {@link bindConversation}.
+   */
+  isDegraded?(): boolean;
   /** Release the underlying connection (a no-op when the saver is in memory). Never throws. */
   close(): void;
 }
@@ -240,6 +247,7 @@ export function openSessionCheckpointerSafe(
         conversationId = id;
         applyMark();
       },
+      isDegraded: () => degraded,
       close: () => {
         reclaimOnClose();
         openSavers.delete(closeOnce);

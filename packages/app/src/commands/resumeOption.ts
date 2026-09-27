@@ -4,11 +4,12 @@ import {
   parseConversationRef,
   type ConversationRef,
 } from '@gaunt-sloth/core/history/conversationRef.js';
+import { RESUME_SURFACE_OF_SUBCOMMAND } from '@gaunt-sloth/core/history/resumeMatrix.js';
 import type { InteractiveSessionOptions } from '@gaunt-sloth/agent/modules/interactiveSessionModule.js';
 
 /**
- * GS2-20 — the `--resume <id>` flag, defined once and attached three times: on `chat`, on `code`,
- * and on the root program for the bare `gth` that starts a code session. The value is validated
+ * GS2-20 — the `--resume <id>` flag, defined once and attached on `chat`, on `code`, on the root
+ * program for the bare `gth` that starts a code session, and (GS2-106) on `ask` and `exec`. The value is validated
  * here, where commander reports a bad one in its own voice and exits before any config is loaded,
  * so a typo never reaches the session.
  *
@@ -32,24 +33,32 @@ export function resumeOption(): Option {
   });
 }
 
-/** The subcommands a root `--resume` can ride along with; the bare command is a `code` session. */
-export const RESUMABLE_COMMANDS: ReadonlySet<string> = new Set(['chat', 'code']);
+/**
+ * The subcommands a root `--resume` can ride along with; the bare command is a `code` session.
+ *
+ * GS2-106 — derived from the resume matrix's subcommand map in core, the one table every resume
+ * surface reads, so a subcommand gains or loses `--resume` in one place.
+ */
+export const RESUMABLE_COMMANDS: ReadonlySet<string> = new Set(
+  Object.keys(RESUME_SURFACE_OF_SUBCOMMAND)
+);
 
 /**
  * GS2-20 — the sentence for a root `--resume` typed in front of a subcommand that cannot take it
- * (`gth --resume 12 ask "…"`). Commander accepts the root option before every subcommand, and only
- * the session commands read it, so without this the intent would be dropped and a fresh `ask`
- * would run as if nothing had been asked. Same register as the ordered checks: what applies, what
- * does not yet, and that nothing ran.
+ * (`gth --resume 12 review`). Commander accepts the root option before every subcommand, and only
+ * the resumable ones read it, so without this the intent would be dropped and a fresh run of the
+ * other command would start as if nothing had been asked. Same register as the ordered checks:
+ * what applies, and that nothing ran.
  */
 export function rootResumeRefusalMessage(
   subcommand: string,
   ref: ConversationRef | number
 ): string {
+  const commands = [...RESUMABLE_COMMANDS].map((c) => `\`gth ${c}\``).join(', ');
   return (
-    `Cannot resume into \`gth ${subcommand}\`: \`--resume\` applies to \`gth chat\`, \`gth code\` ` +
-    'and the bare `gth` command. Resuming a conversation into `ask` or `exec` is not available ' +
-    `yet (GS2-106). Nothing was run, and conversation ${formatConversationRef(ref)} was not touched.`
+    `Cannot resume into \`gth ${subcommand}\`: \`--resume\` applies to ${commands} and the bare ` +
+    `\`gth\` command. Nothing was run, and conversation ${formatConversationRef(ref)} was not ` +
+    'touched.'
   );
 }
 

@@ -181,7 +181,8 @@ describe('GS2-20: the seam module composed with a real runner over a real store'
     const second = await startRunner(two.saver, two.threadId);
     const resolution = await resolveResumeTarget(
       { config, checkpointer: two, workspace: projectDir },
-      conversationId
+      conversationId,
+      'interactive'
     );
     expect(resolution.ok).toBe(true);
     if (!resolution.ok) return;
@@ -238,7 +239,8 @@ describe('GS2-20: the seam module composed with a real runner over a real store'
 
     const resolution = await resolveResumeTarget(
       { config, checkpointer: two, workspace: projectDir },
-      conversationId
+      conversationId,
+      'interactive'
     );
     expect(resolution.ok).toBe(true);
     if (!resolution.ok) return;
@@ -271,7 +273,8 @@ describe('GS2-20: the seam module composed with a real runner over a real store'
 
     const resolution = await resolveResumeTarget(
       { config, checkpointer: one, workspace: projectDir },
-      conversationId
+      conversationId,
+      'interactive'
     );
     expect(resolution.ok).toBe(true);
     if (!resolution.ok) return;

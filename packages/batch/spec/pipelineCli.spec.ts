@@ -405,6 +405,6 @@ describe('runBatchCli — the production per-cell adapter', () => {
     expect(runSingleShot).toHaveBeenCalledTimes(1);
     const [, , , , , command, , options] = runSingleShot.mock.calls[0];
     expect(command).toBe('exec');
-    expect(options).toEqual({ displayCommand: 'gth-batch' });
+    expect(options).toEqual({ displayCommand: 'gth-batch', origin: 'gth-batch' });
   });
 });

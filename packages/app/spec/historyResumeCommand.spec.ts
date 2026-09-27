@@ -1,8 +1,10 @@
 /**
- * GS2-20 — `gth history resume <id>`: starts the session in the mode the conversation was recorded
- * under, with the resume id, and fails soft — a warning, no session — for a single-shot row, an
- * unknown id, a bad id, or history turned off. Takes no `--db`. Real store over a temp file; the
- * session itself is mocked at `startSession`, which is where the seam takes over.
+ * GS2-20 — `gth history resume <id> [message]`: starts the session in the mode the conversation was
+ * recorded under, with the resume id, and (GS2-106) runs an ask or exec row as that command with the
+ * new message. Every refusal — an unknown id, a bad id, history off, no store, a row the resume
+ * matrix refuses, a single-shot row with no message — is a warning, nothing run, and exit status 1.
+ * Takes no `--db`. Real store over a temp file; the session is mocked at `startSession` and the
+ * single-shot commands at their bodies, which is where the seam takes over.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -22,12 +24,28 @@ vi.mock('@gaunt-sloth/core/config.js', async (importOriginal) => ({
 const consoleMock = vi.hoisted(() => ({
   display: vi.fn(),
   displayInfo: vi.fn(),
+  displayNotice: vi.fn(),
   displayWarning: vi.fn(),
 }));
 vi.mock('@gaunt-sloth/core/utils/consoleUtils.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@gaunt-sloth/core/utils/consoleUtils.js')>()),
   ...consoleMock,
 }));
+
+// GS2-106 — the exit status and the piped message, read through the real module otherwise.
+const systemMock = vi.hoisted(() => ({ setExitCode: vi.fn(), getStringFromStdin: vi.fn() }));
+vi.mock('@gaunt-sloth/core/utils/systemUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@gaunt-sloth/core/utils/systemUtils.js')>()),
+  ...systemMock,
+}));
+
+// GS2-106 — an ask or exec row runs through that command's own body; what this spec asserts is
+// that `history resume` hands it the row, the message and the `history` surface. What the body
+// then does with a resume is asserted in `singleShotResumeCommands.spec.ts`.
+const runAskCommandMock = vi.hoisted(() => vi.fn());
+vi.mock('#src/commands/askCommand.js', () => ({ runAskCommand: runAskCommandMock }));
+const runExecCommandMock = vi.hoisted(() => vi.fn());
+vi.mock('#src/commands/execCommand.js', () => ({ runExecCommand: runExecCommandMock }));
 
 describe('gth history resume <id> (GS2-20)', () => {
   let dir: string;
@@ -100,43 +118,136 @@ describe('gth history resume <id> (GS2-20)', () => {
     );
   });
 
-  it('fails soft for a single-shot run: a warning naming the command, and no session', async () => {
-    const { askId } = await seed();
-    await run(String(askId));
-    expect(startSessionMock).not.toHaveBeenCalled();
-    expect(consoleMock.displayWarning).toHaveBeenCalledTimes(1);
-    const [warning] = consoleMock.displayWarning.mock.calls[0];
-    expect(warning).toContain(`Conversation #${askId}`);
-    expect(warning).toContain('`gth ask`');
-    expect(warning).toContain('single-shot');
-    expect(warning).toContain(`gth history show ${askId}`);
+  it('passes a message to a chat or code session as its first input', async () => {
+    const { chatId } = await seed();
+    await run(String(chatId), 'carry on from here');
+    expect(startSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'chat' }),
+      { global: true },
+      'carry on from here',
+      { resumeConversationId: chatId }
+    );
   });
 
-  // GS2-106 — the sentence is pinned WHOLE: an ask row now keeps its state, so the old "keeps no
-  // conversation state" was false, and a spec matching only "single-shot" could not see it return.
-  it('the single-shot refusal says resuming one is not supported yet, for an ask row that carries a thread', async () => {
+  // GS2-106 — a single-shot row runs as the command it was recorded under, with the message as
+  // the new user input. This spelling never switches command.
+  it('runs an ask row as ask, with the message, on the history surface — by integer and by run id', async () => {
     await seed();
     const { recordSessionTurnSafe } = await import('@gaunt-sloth/core/history/recordSession.js');
     const ask = recordSessionTurnSafe(
       { history: { dbPath } },
       { command: 'ask', prompt: 'p', response: 'r', threadId: 'thread-ask' }
     )!;
-    await run(String(ask.conversationId));
-    expect(startSessionMock).not.toHaveBeenCalled();
     const id = ask.conversationId;
-    expect(consoleMock.displayWarning.mock.calls).toEqual([
-      [
-        `Conversation #${id} was recorded by \`gth ask\`, a single-shot run. Resuming a ` +
-          `single-shot run is not supported yet. \`gth history show ${id}\` prints it.`,
-      ],
+    await run(String(id), 'and then?');
+    await run(ask.runId!, 'and then?');
+    expect(runAskCommandMock.mock.calls).toEqual([
+      ['and then?', {}, { global: true }, { ref: id, surface: 'history' }],
+      ['and then?', {}, { global: true }, { ref: id, surface: 'history' }],
     ]);
-    // The same refusal when the row is named by its run id.
-    consoleMock.displayWarning.mockClear();
-    await run(ask.runId!);
+    expect(runExecCommandMock).not.toHaveBeenCalled();
     expect(startSessionMock).not.toHaveBeenCalled();
-    expect(consoleMock.displayWarning).toHaveBeenCalledWith(
-      expect.stringContaining(`Conversation #${id} was recorded by \`gth ask\``)
+    expect(systemMock.setExitCode).not.toHaveBeenCalled();
+  });
+
+  it('runs an exec row as exec, with the message as -m', async () => {
+    const { recordSessionTurnSafe } = await import('@gaunt-sloth/core/history/recordSession.js');
+    const exec = recordSessionTurnSafe(
+      { history: { dbPath } },
+      { command: 'exec', prompt: 'p', response: 'r', threadId: 'thread-exec' }
+    )!;
+    await run(String(exec.conversationId), 'now the tests');
+    expect(runExecCommandMock).toHaveBeenCalledWith(
+      undefined,
+      { message: 'now the tests' },
+      { global: true },
+      { ref: exec.conversationId, surface: 'history' }
     );
+    expect(runAskCommandMock).not.toHaveBeenCalled();
+  });
+
+  it('reads the message for a single-shot row from stdin when no positional is given', async () => {
+    const { askId } = await seed();
+    systemMock.getStringFromStdin.mockReturnValue('piped follow-up');
+    await run(String(askId));
+    expect(runAskCommandMock).toHaveBeenCalledWith(
+      'piped follow-up',
+      {},
+      { global: true },
+      { ref: askId, surface: 'history' }
+    );
+  });
+
+  it('refuses a single-shot row with no message at all, naming how to give one, and exits 1', async () => {
+    const { askId } = await seed();
+    systemMock.getStringFromStdin.mockReturnValue('');
+    await run(String(askId));
+    expect(runAskCommandMock).not.toHaveBeenCalled();
+    expect(consoleMock.displayWarning).toHaveBeenCalledWith(
+      `Conversation #${askId} was recorded by \`gth ask\`, so resuming it needs a new message: ` +
+        `\`gth history resume ${askId} "…"\`, or pipe one on stdin. Nothing was run.`
+    );
+    expect(systemMock.setExitCode).toHaveBeenCalledWith(1);
+  });
+
+  it('refuses a fan-out cell and a review row through the matrix, before asking for a message, and exits 1', async () => {
+    const { recordSessionTurnSafe } = await import('@gaunt-sloth/core/history/recordSession.js');
+    const cell = recordSessionTurnSafe(
+      { history: { dbPath } },
+      { command: 'exec', origin: 'batch', prompt: 'p', response: 'r', threadId: 'thread-cell' }
+    )!;
+    const review = recordSessionTurnSafe(
+      { history: { dbPath } },
+      { command: 'review', prompt: 'p', response: 'r' }
+    )!;
+    for (const [id, named] of [
+      [cell.conversationId, '`gth batch`'],
+      [review.conversationId, '`gth review`'],
+    ] as const) {
+      vi.clearAllMocks();
+      await run(String(id), 'a message that must not run');
+      expect(runAskCommandMock).not.toHaveBeenCalled();
+      expect(runExecCommandMock).not.toHaveBeenCalled();
+      expect(startSessionMock).not.toHaveBeenCalled();
+      expect(consoleMock.displayNotice).toHaveBeenCalledTimes(1);
+      const [title, lines] = consoleMock.displayNotice.mock.calls[0];
+      expect(title).toBe(`Conversation #${id} cannot be resumed`);
+      expect((lines as string[]).join(' ')).toContain(named);
+      expect((lines as string[]).join(' ')).toContain(`gth history show ${id}`);
+      expect((lines as string[]).join(' ')).toContain('Nothing was run.');
+      expect(systemMock.setExitCode).toHaveBeenCalledWith(1);
+    }
+  });
+
+  // ACCEPTANCE (cross-command, one fixture, both rules) — the SAME ask row: `gth chat --resume`
+  // takes it into an interactive session, and `gth history resume` runs it as `ask`.
+  it('ACCEPTANCE: one ask row — chat --resume starts a chat session in it, history resume runs it as ask', async () => {
+    const { recordSessionTurnSafe } = await import('@gaunt-sloth/core/history/recordSession.js');
+    const ask = recordSessionTurnSafe(
+      { history: { dbPath } },
+      { command: 'ask', prompt: 'p', response: 'r', threadId: 'thread-ask' }
+    )!;
+    const { chatCommand } = await import('#src/commands/chatCommand.js');
+    const program = new Command();
+    program.exitOverride();
+    chatCommand(program, { global: true });
+    await program.parseAsync(['node', 'gth', 'chat', '--resume', String(ask.conversationId)]);
+    expect(startSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'chat' }),
+      { global: true },
+      undefined,
+      { resumeConversationId: { kind: 'id', id: ask.conversationId } }
+    );
+
+    await run(String(ask.conversationId), 'follow-up');
+    expect(runAskCommandMock).toHaveBeenCalledWith(
+      'follow-up',
+      {},
+      { global: true },
+      { ref: ask.conversationId, surface: 'history' }
+    );
+    // history resume never switched it into a session.
+    expect(startSessionMock).toHaveBeenCalledTimes(1);
   });
 
   it('resolves a run id to its conversation and starts the session with that integer', async () => {
@@ -179,6 +290,8 @@ describe('gth history resume <id> (GS2-20)', () => {
     await run('1abc');
     expect(consoleMock.displayWarning).toHaveBeenLastCalledWith('Invalid conversation id "1abc".');
     expect(startSessionMock).not.toHaveBeenCalled();
+    // GS2-106 — every one of the three refusals exits 1.
+    expect(systemMock.setExitCode.mock.calls).toEqual([[1], [1], [1]]);
   });
 
   it('fails soft for an unknown id and for an id that is not one', async () => {
@@ -194,6 +307,8 @@ describe('gth history resume <id> (GS2-20)', () => {
     expect(consoleMock.displayWarning).toHaveBeenCalledWith('Invalid conversation id "abc".');
     // No config was loaded for a bad id — nothing to load it for.
     expect(initConfigMock).toHaveBeenCalledTimes(1);
+    // GS2-106 — both exit 1: the person asked for something to run and it did not.
+    expect(systemMock.setExitCode.mock.calls).toEqual([[1], [1]]);
   });
 
   it('fails soft when history is off, naming the switch', async () => {
@@ -204,6 +319,7 @@ describe('gth history resume <id> (GS2-20)', () => {
     expect(consoleMock.displayWarning).toHaveBeenCalledWith(
       expect.stringContaining('`history.enabled: false`')
     );
+    expect(systemMock.setExitCode).toHaveBeenCalledWith(1);
   });
 
   it('with no store at all says there is no history yet — the sentence history list uses — not that the id is unknown', async () => {
@@ -216,6 +332,7 @@ describe('gth history resume <id> (GS2-20)', () => {
     expect(warning).toBe(NO_HISTORY_MESSAGE);
     expect(warning).toContain('No session history found');
     expect(warning).not.toContain('No conversation #1');
+    expect(systemMock.setExitCode).toHaveBeenCalledWith(1);
   });
 
   it('takes no --db: the store is the one the session config names', async () => {

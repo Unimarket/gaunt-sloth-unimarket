@@ -195,6 +195,8 @@ export async function runConversation(
         // GS2-7 (B20): local, fail-soft per-turn session history. A no-op when `history.enabled` is
         // false.
         recordSessionSafe(config, {
+          // GS2-106 — a multi-turn eval conversation is a fan-out run too, recorded as such.
+          ...(options?.origin ? { origin: options.origin } : {}),
           command,
           // The turn's PROJECT ROOT, not the directory this run is in: `getProjectDir()` is the
           // discovered config root whenever one was found above us. Nothing may render it as

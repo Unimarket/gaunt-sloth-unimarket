@@ -166,7 +166,7 @@ describe('runWorkflow', () => {
       // GS2-95 — the header says `workflow` while the mode prompt stays `ask` (the argument above).
       // If someone ever "simplifies" the display name into the command argument, these two cells
       // disagree and this is the test that says so.
-      { displayCommand: 'workflow' }
+      { displayCommand: 'workflow', origin: 'workflow' }
     );
     expect(resolveAgentFactory).toHaveBeenCalledWith(expect.anything(), 'lean');
     expect(cleanupTools).toHaveBeenCalledTimes(1);

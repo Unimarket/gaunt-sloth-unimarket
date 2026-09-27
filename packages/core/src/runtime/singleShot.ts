@@ -150,6 +150,34 @@ export interface SingleShotOptions {
    * on. The value itself reaches a caller as `SingleShotResult.recap`.
    */
   announceRunRecap?: boolean;
+
+  /**
+   * GS2-106 — the fan-out surface driving this run (`batch`, `eval`, `gth-batch`, `workflow`),
+   * recorded on the conversation as its `origin`. A direct `ask`/`exec` omits it.
+   *
+   * An explicit option rather than something inferred from {@link displayCommand}: that one names
+   * the header, and a header is free to change its wording, while this decides whether every resume
+   * surface refuses the row. The two happen to hold the same words today; nothing should rely on it.
+   */
+  origin?: string;
+
+  /**
+   * GS2-106 — continue a recorded conversation instead of starting one: the conversation the
+   * caller's resume seam already resolved and checked (`ask --resume`, `exec --resume`,
+   * `gth history resume`). The run re-enters `threadId` from its checkpoint and appends `content`
+   * as a fresh user message; the turn is recorded under `conversationId`.
+   */
+  resume?: SingleShotResume;
+}
+
+/**
+ * GS2-106 — a conversation a single-shot run continues. Resolved and checked BEFORE the run by the
+ * resume seam, which is also where a refusal is said; this runtime only re-enters it.
+ */
+export interface SingleShotResume {
+  conversationId: number;
+  /** The LangGraph thread whose checkpoint holds the conversation's state. */
+  threadId: string;
 }
 
 /**
@@ -204,9 +232,11 @@ export async function runSingleShot(
     // Only the human turn: the agent supplies the system prompt via `createAgent({ systemPrompt })`.
     const messages = [new HumanMessage(content)];
 
-    // Resolve output path and initialize session logging if enabled
+    // Resolve output path and initialize session logging if enabled. A resume starts it only after
+    // the checkpointer below has opened, so a resume refused there leaves no report file behind.
     const filePath = getCommandOutputFilePath(config, source);
-    if (filePath) {
+    const resume = options?.resume;
+    if (filePath && !resume) {
       initSessionLogging(filePath, config.streamSessionInferenceLog);
     }
 
@@ -235,7 +265,36 @@ export async function runSingleShot(
     // `gth history prune` removes it. The thread is unnamed for the length of the run, until the
     // row below is written; the saver's own write set and the grace window cover that gap, as they
     // do for an interactive session after `/clear`.
-    checkpointer = openSessionCheckpointerSafe(config);
+    //
+    // **A resume opens the saver ON the stored thread** (GS2-106), and the runner is initialised on
+    // it below. That is the same checkpoint re-entry an interactive resume makes — the graph loads
+    // the thread's state, tool results included, and `content` is appended as a new user message —
+    // without going through `GthAgentRunner.resumeConversation`, deliberately: that call also
+    // installs the conversation's stored approval grants, and a non-interactive resume never
+    // restores them (Andrew, 2026-09-27). An unattended run gets only what the config allows, so
+    // grants a person made while watching an interactive session cannot reach it.
+    checkpointer = openSessionCheckpointerSafe(
+      config,
+      resume ? { threadId: resume.threadId } : undefined
+    );
+    if (resume) {
+      // The seam checked this store before the run; if it will not open now, running on a
+      // `MemorySaver` would answer the new message with none of the conversation behind it, under
+      // the conversation's own id. Refused instead, with nothing run.
+      if (!checkpointer.durable) {
+        displayError(
+          `Conversation #${resume.conversationId} was not resumed: the conversation store did not ` +
+            'open. Nothing was run.'
+        );
+        return { ok: false, answer: '', terminationReason: null, recap: null, tools: [] };
+      }
+      // Bound BEFORE the turn, as an interactive resume binds: the row exists already, so a
+      // checkpoint write that fails during this turn cuts its link at once.
+      checkpointer.bindConversation?.(resume.conversationId);
+      if (filePath) {
+        initSessionLogging(filePath, config.streamSessionInferenceLog);
+      }
+    }
 
     // Run via Agent Runner (consistent with interactive session)
     const runner = new GthAgentRunner(defaultStatusCallback, resolvers, agentFactory);
@@ -346,8 +405,14 @@ export async function runSingleShot(
     //
     // GS2-106: the row this opens carries the run's thread, so the checkpointed state is reachable
     // from the conversation id and its run id.
+    //
+    // A resumed run records under the conversation it continued: one row, its turns growing, its
+    // run id and its `command` unchanged (`recordTurn` never rewrites either on an existing row).
     const recorded = recordSessionTurnSafe(config, {
-      threadId: checkpointer.durable ? checkpointer.threadId : undefined,
+      ...(resume
+        ? { conversationId: resume.conversationId }
+        : { threadId: checkpointer.durable ? checkpointer.threadId : undefined }),
+      ...(options?.origin ? { origin: options.origin } : {}),
       command,
       // The run's PROJECT ROOT, not the directory this run is in: `getProjectDir()` is the
       // discovered config root whenever one was found above us. Nothing may render it as where
@@ -363,8 +428,8 @@ export async function runSingleShot(
     });
     // GS2-20's degrade half, now for this path too: name the row a failed checkpoint write must mark
     // unresumable. A failure that happened during the run is applied here, cutting the link that
-    // was just written.
-    checkpointer.bindConversation?.(recorded?.conversationId);
+    // was just written. A resumed run was bound before its turn and stays bound to that row.
+    if (!resume) checkpointer.bindConversation?.(recorded?.conversationId);
 
     progressIndicator?.stop();
 

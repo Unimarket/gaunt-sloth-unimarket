@@ -72,6 +72,12 @@ export interface SessionRecord {
   project?: string;
   /** Originating command (ask/chat/code/exec/…). */
   command?: string;
+  /**
+   * GS2-106 — the fan-out surface that started this run (`batch`, `eval`, `gth-batch`, `workflow`),
+   * omitted for a direct run. Like {@link threadId}, written only when this record opens its own
+   * fresh conversation.
+   */
+  origin?: string;
   /** Human-readable model/provider label. */
   model?: string;
   /** The user prompt / source that started the run (full-text indexed). */
@@ -183,6 +189,11 @@ export interface ConversationSummary {
    * written before run ids existed; those stay addressable by {@link id}.
    */
   runId?: string;
+  /**
+   * GS2-106 — the fan-out surface that started the run (`batch`, `eval`, `gth-batch`, `workflow`);
+   * absent for a direct run and for any row written before the column existed.
+   */
+  origin?: string;
 }
 
 /** Aggregate analytics over the whole store (local only). */
@@ -294,7 +305,7 @@ export class HistoryStore {
     //
     // GS2-106 adds `conversations.run_id` on the same terms, with its UNIQUE index created in
     // {@link migrate} after the ALTER; the reason it is a column of its own and not `thread_id` is
-    // at that ALTER.
+    // at that ALTER. `conversations.origin` follows on the same terms again.
     //
     // Both tables carry a `project` column, and both hold the PROJECT ROOT the row was written
     // under — not the working directory the session was in. See {@link SessionRecord.project} and
@@ -309,7 +320,8 @@ export class HistoryStore {
         model TEXT,
         thread_id TEXT,
         grants TEXT,
-        run_id TEXT
+        run_id TEXT,
+        origin TEXT
       );
       CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -404,6 +416,14 @@ export class HistoryStore {
       this.db.exec(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_run_id ON conversations(run_id)`
       );
+      // GS2-106 — the surface that started a fan-out run (`batch`, `eval`, `gth-batch`,
+      // `workflow`), NULL for a direct `ask`/`exec`/`chat`/`code` run. `command` keeps the mode the
+      // run actually used, which is what `gth insights` groups by; this column is what tells one
+      // cell of a batch apart from a real `gth exec`, so every resume surface can refuse the cell.
+      // Nullable, with no backfill: a row written before it existed has no origin on record.
+      if (!conversationCols.some((c) => c.name === 'origin')) {
+        this.db.exec(`ALTER TABLE conversations ADD COLUMN origin TEXT`);
+      }
       const orphans = this.db
         .prepare(
           `SELECT id, ts, project, command, model
@@ -556,7 +576,7 @@ export class HistoryStore {
         .prepare(
           `SELECT c.id AS id, c.started_ts AS started_ts, c.project AS project,
                   c.command AS command, c.model AS model, c.thread_id AS thread_id,
-                  c.run_id AS run_id,
+                  c.run_id AS run_id, c.origin AS origin,
                   COUNT(s.id) AS turn_count, MIN(s.ts) AS first_ts, MAX(s.ts) AS last_ts
              FROM conversations c
              LEFT JOIN sessions s ON s.conversation_id = c.id
@@ -585,6 +605,7 @@ export class HistoryStore {
         threadId:
           r.thread_id != null && String(r.thread_id).length > 0 ? String(r.thread_id) : undefined,
         runId: r.run_id != null ? String(r.run_id) : undefined,
+        origin: r.origin != null ? String(r.origin) : undefined,
       };
     } catch {
       return null;
@@ -660,8 +681,9 @@ export class HistoryStore {
           runId = randomUUID();
           const cinfo = this.db
             .prepare(
-              `INSERT INTO conversations (started_ts, project, command, model, thread_id, run_id)
-               VALUES (?, ?, ?, ?, ?, ?)`
+              `INSERT INTO conversations
+                 (started_ts, project, command, model, thread_id, run_id, origin)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
             )
             .run(
               ts,
@@ -669,7 +691,8 @@ export class HistoryStore {
               rec.command ?? null,
               rec.model ?? null,
               rec.threadId ?? null,
-              runId
+              runId,
+              rec.origin ?? null
             );
           conversationId = Number(cinfo.lastInsertRowid);
         } else {
@@ -790,7 +813,7 @@ export class HistoryStore {
         .prepare(
           `SELECT c.id AS id, c.started_ts AS started_ts, c.project AS project,
                   c.command AS command, c.model AS model, c.thread_id AS thread_id,
-                  c.run_id AS run_id,
+                  c.run_id AS run_id, c.origin AS origin,
                   COUNT(s.id) AS turn_count, MIN(s.ts) AS first_ts, MAX(s.ts) AS last_ts
              FROM conversations c
              LEFT JOIN sessions s ON s.conversation_id = c.id
@@ -819,6 +842,7 @@ export class HistoryStore {
           lastResponse: last?.response != null ? String(last.response) : undefined,
           threadId: r.thread_id != null ? String(r.thread_id) : undefined,
           runId: r.run_id != null ? String(r.run_id) : undefined,
+          origin: r.origin != null ? String(r.origin) : undefined,
         };
       });
     } catch {

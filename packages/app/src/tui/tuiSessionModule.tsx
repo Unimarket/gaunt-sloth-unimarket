@@ -531,7 +531,8 @@ async function runTuiSession(
   if (options.resumeConversationId !== undefined) {
     const resolution = await resolveResumeTarget(
       { config, checkpointer, workspace: getProjectDir() },
-      options.resumeConversationId
+      options.resumeConversationId,
+      'interactive'
     );
     if (!resolution.ok) {
       const notice = resumeRefusalNotice(resolution.refusal);
@@ -854,7 +855,8 @@ async function runTuiSession(
       async resumeConversation(id) {
         const resolution = await resolveResumeTarget(
           { config, checkpointer, workspace: getProjectDir(), current: conversationId },
-          id
+          id,
+          'interactive'
         );
         if (!resolution.ok) return resolution;
         await applyResumeTarget({ runner, checkpointer }, resolution.target);

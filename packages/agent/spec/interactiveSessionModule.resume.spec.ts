@@ -317,13 +317,14 @@ describe('interactiveSessionModule — resume (GS2-20)', () => {
       expect(notice.lines.join(' ')).toContain('`gth history list`');
     });
 
-    it('a single-shot run has no state to re-enter', async () => {
+    // GS2-106 — refused for having no thread, the reason that is true of it, and no longer for
+    // being an ask row: the matrix lets an interactive session take one that has state.
+    it('a single-shot run recorded with no thread has no state to re-enter', async () => {
       const { recordSessionSafe } = await core();
       const askId = recordSessionSafe(config, { command: 'ask', prompt: 'p', response: 'r' })!;
       const notice = await refused(askId);
       expect(notice.title).toBe(`Conversation #${askId} cannot be resumed`);
-      expect(notice.lines[0]).toContain('`gth ask`');
-      expect(notice.lines[0]).toContain('single-shot');
+      expect(notice.lines[0]).toContain('not on record');
     });
 
     it('a conversation marked unresumable (null thread)', async () => {
@@ -531,16 +532,18 @@ describe('interactiveSessionModule — resume (GS2-20)', () => {
     expect(ownGrants).toBeNull();
   });
 
-  // GS2-106 — an `ask` row now carries a thread and a checkpoint exactly as a chat row does, so the
-  // thread no longer tells them apart. The COMMAND check is what keeps an ask row out of every
-  // interactive resume; each cell below has a chat row seeded identically as its control, so a
-  // refusal for some other reason (workspace, no checkpoint) cannot pass for it.
-  describe('GS2-106 — an ask row with a real thread and checkpoint is still refused', () => {
-    /** A single-shot row as `runSingleShot` now leaves one: opened by the record, thread linked. */
-    const seedAsk = async (threadId: string) => {
+  // GS2-106 — an `ask` row carries a thread and a checkpoint exactly as a chat row does, and the
+  // resume matrix now lets an interactive session take it: "start with `gth ask`, continue in
+  // interactive mode" is the node's named example. A fan-out cell seeded with the SAME shape is the
+  // control that the matrix is what decides — its command column says `exec`, and only its origin
+  // keeps it out.
+  describe('GS2-106 — an ask row resumes interactively; a fan-out cell of the same shape does not', () => {
+    /** A single-shot row as `runSingleShot` leaves one: opened by the record, thread linked. */
+    const seedSingleShot = async (threadId: string, over: { origin?: string } = {}) => {
       const c = await core();
       const recorded = c.recordSessionTurnSafe(config, {
-        command: 'ask',
+        command: over.origin ? 'exec' : 'ask',
+        ...(over.origin ? { origin: over.origin } : {}),
         project: '/proj',
         prompt: 'an ask prompt',
         response: 'an ask answer',
@@ -565,68 +568,93 @@ describe('interactiveSessionModule — resume (GS2-20)', () => {
       return recorded;
     };
 
-    it('by gth chat --resume <id>, by integer and by run id; the chat control resumes', async () => {
-      const ask = await seedAsk('thread-ask');
-      const refused = async (ref: number | string) => {
-        vi.clearAllMocks();
-        runnerInstanceMock.init.mockResolvedValue(undefined);
-        turnsAsked = 0;
-        await startSession({
-          resumeConversationId: typeof ref === 'number' ? ref : { kind: 'run', runId: ref },
-        });
-        expect(runnerInstanceMock.resumeConversation).not.toHaveBeenCalled();
-        expect(systemUtilsMock.exit).toHaveBeenCalledWith(1);
-        const [notice] = notices();
-        expect(notice.title).toBe(`Conversation #${ask.conversationId} cannot be resumed`);
-        expect(notice.lines[0]).toContain('`gth ask`');
-        expect(notice.lines[0]).toContain('resuming a single-shot run is not supported yet');
-      };
-      await refused(ask.conversationId);
-      await refused(ask.runId!);
-
-      // CONTROL — a chat row with the same shape of thread and checkpoint does resume.
-      const chat = await seed({ command: 'chat', threadId: 'thread-chat-control' });
+    const boot = async (ref: number | string) => {
       vi.clearAllMocks();
       runnerInstanceMock.init.mockResolvedValue(undefined);
       turnsAsked = 0;
-      await startSession({ resumeConversationId: chat });
-      expect(runnerInstanceMock.resumeConversation).toHaveBeenCalledTimes(1);
-      expect(runnerInstanceMock.resumeConversation.mock.calls[0][0].threadId).toBe(
-        'thread-chat-control'
-      );
+      await startSession({
+        resumeConversationId: typeof ref === 'number' ? ref : { kind: 'run', runId: ref },
+      });
+    };
+
+    it('ACCEPTANCE: gth chat --resume takes an ask row, by integer and by run id, and records the new turn under it', async () => {
+      const ask = await seedSingleShot('thread-ask');
+      for (const ref of [ask.conversationId, ask.runId!]) {
+        scriptedTurns = ['a follow-up in chat'];
+        await boot(ref);
+        expect(systemUtilsMock.exit).not.toHaveBeenCalledWith(1);
+        expect(runnerInstanceMock.resumeConversation).toHaveBeenCalledTimes(1);
+        expect(runnerInstanceMock.resumeConversation.mock.calls[0][0].threadId).toBe('thread-ask');
+        const banner = notices().find(
+          (n) => n.title === `Resumed conversation #${ask.conversationId}`
+        );
+        expect(banner!.lines.join(' ')).toContain('recorded under gth ask');
+      }
+      // One conversation, its turns growing, its command still `ask`.
+      const after = await threadOf(ask.conversationId);
+      expect(after.turns.map((t) => t.prompt)).toEqual([
+        'an ask prompt',
+        'a follow-up in chat',
+        'a follow-up in chat',
+      ]);
+      expect(after.conversations.map((c) => [c.id, c.command])).toEqual([
+        [ask.conversationId, 'ask'],
+      ]);
     });
 
-    it('by /resume <id> mid-session; the chat control resumes through the same seam', async () => {
-      const ask = await seedAsk('thread-ask');
-      const chat = await seed({ command: 'chat', threadId: 'thread-chat-control' });
-      scriptedTurns = ['first', `/resume ${ask.conversationId}`, `/resume ${ask.runId}`];
+    it('the fan-out control of the same shape is refused by --resume, naming its origin', async () => {
+      const cell = await seedSingleShot('thread-cell', { origin: 'batch' });
+      await boot(cell.conversationId);
+      expect(runnerInstanceMock.resumeConversation).not.toHaveBeenCalled();
+      expect(runnerInstanceMock.init).not.toHaveBeenCalled();
+      expect(systemUtilsMock.exit).toHaveBeenCalledWith(1);
+      const [notice] = notices();
+      expect(notice.title).toBe(`Conversation #${cell.conversationId} cannot be resumed`);
+      expect(notice.lines[0]).toContain('`gth batch`');
+    });
+
+    it('by /resume <id> mid-session: the ask row resumes through the same seam, the fan-out cell is refused', async () => {
+      const ask = await seedSingleShot('thread-ask');
+      const cell = await seedSingleShot('thread-cell', { origin: 'eval' });
+      scriptedTurns = ['first', `/resume ${cell.conversationId}`, `/resume ${ask.runId}`];
       await startSession();
       const refusals = notices().filter(
-        (n) => n.title === `Conversation #${ask.conversationId} cannot be resumed`
+        (n) => n.title === `Conversation #${cell.conversationId} cannot be resumed`
       );
-      expect(refusals).toHaveLength(2);
-      for (const r of refusals) expect(r.lines[0]).toContain('`gth ask`');
-      expect(runnerInstanceMock.resumeConversation).not.toHaveBeenCalled();
-
-      vi.clearAllMocks();
-      runnerInstanceMock.init.mockResolvedValue(undefined);
-      runnerInstanceMock.processMessages.mockResolvedValue('the answer');
-      turnsAsked = 0;
-      scriptedTurns = ['first', `/resume ${chat}`];
-      await startSession();
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0].lines[0]).toContain('`gth eval`');
       expect(runnerInstanceMock.resumeConversation).toHaveBeenCalledTimes(1);
+      expect(runnerInstanceMock.resumeConversation.mock.calls[0][0].threadId).toBe('thread-ask');
     });
 
-    it('by the /resume picker, which offers the chat control and not the ask row', async () => {
-      const ask = await seedAsk('thread-ask');
-      const chat = await seed({ command: 'chat', threadId: 'thread-chat-control' });
+    it('the /resume picker offers the ask row and not the fan-out cell', async () => {
+      const ask = await seedSingleShot('thread-ask');
+      const cell = await seedSingleShot('thread-cell', { origin: 'workflow' });
       scriptedTurns = ['a first turn', '/resume'];
       await startSession();
       const picker = notices().find((n) => n.title === 'Conversations you can resume');
       expect(picker).toBeDefined();
       const body = picker!.lines.join('\n');
-      expect(body).toContain(`#${chat}`);
-      expect(body).not.toContain(`#${ask.conversationId}`);
+      expect(body).toContain(`#${ask.conversationId}`);
+      expect(body).not.toContain(`#${cell.conversationId}`);
+    });
+
+    // REVISION 2 — the interactive half of the grants pin. The non-interactive half, the SAME row
+    // shape resumed by `gth ask --write --resume`, is in the app package's
+    // `singleShotResumeCommands.spec.ts`: there the grant must NOT be in force.
+    it('REVISION 2: a stored grant on an ask row IS restored by gth code --resume', async () => {
+      const ask = await seedSingleShot('thread-ask');
+      const { saveConversationGrantsSafe } = await core();
+      saveConversationGrantsSafe(config, ask.conversationId, {
+        allow: [grant('git push')],
+        deny: [],
+      });
+      await boot(ask.conversationId);
+      expect(runnerInstanceMock.resumeConversation).toHaveBeenCalledTimes(1);
+      const [[seam]] = runnerInstanceMock.resumeConversation.mock.calls;
+      expect(seam.grants.allow.map((g: { entry: unknown }) => g.entry)).toEqual([
+        { type: 'shell', matcher: 'exact', pattern: 'git push' },
+      ]);
     });
   });
 

@@ -745,6 +745,7 @@ export function evalCommand(
             command: 'ask',
             // The header says `eval`; the mode prompt stays `ask`. Do not collapse these two.
             displayCommand: 'eval',
+            origin: 'eval',
             sourcePrefix: 'EVAL',
             wrapBlockPrefix: 'message',
             wrapPrefix: 'user message',

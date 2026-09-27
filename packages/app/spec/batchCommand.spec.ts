@@ -167,7 +167,7 @@ describe('batchCommand', () => {
     // GS2-95 — the run header says `batch` while the mode prompt stays `exec`. These two are
     // asserted together on purpose: "simplifying" the display name into the command argument would
     // silently move which system prompt every batch cell runs under, and this pair is what says so.
-    expect(options).toEqual({ displayCommand: 'batch' });
+    expect(options).toEqual({ displayCommand: 'batch', origin: 'batch' });
     expect(config.writeOutputToFile).toBe(false);
     expect(config.canInterruptInferenceWithEsc).toBe(false);
     expect(agentFactory).toBe(resolvedFactory);

@@ -2,9 +2,10 @@
  * @packageDocumentation
  * GS2-20 — **the one seam through which a session re-enters a stored conversation.**
  *
- * Three spellings reach it — `--resume <id>` on `gth chat` / `gth code` / bare `gth`, `/resume <id>`
- * inside a running session, and `gth history resume <id>` — and every one of them is exactly two
- * calls: {@link resolveResumeTarget} decides whether the conversation CAN be resumed and gathers what
+ * Its spellings — `--resume <id>` on `gth chat` / `gth code` / bare `gth`, `/resume <id>` inside a
+ * running session, `gth history resume <id>`, and (GS2-106) `gth ask --resume <id>` and
+ * `gth exec --resume <id>` — all go through {@link resolveResumeTarget}. The interactive ones are
+ * exactly two calls: {@link resolveResumeTarget} decides whether the conversation CAN be resumed and gathers what
  * a resume needs, and {@link applyResumeTarget} makes the session be in it. Neither surface (the
  * readline loop, the Ink TUI) knows anything a resume requires beyond those two calls, so a check
  * added here is applied to every spelling, and a spelling cannot drift into meaning something else.
@@ -23,8 +24,10 @@
  * 1. history is off — the one switch that governs recording, checkpointing and resuming alike;
  * 2. the store did not open — asked for and not available, which is a different fact from off;
  * 3. no such conversation — the id, integer or run id, names no row in THIS store;
- * 4. the conversation exists and is not resumable — recorded by a single-shot command, never had a
- *    thread, lost it, or its thread was never checkpointed — with the reason class where it is known;
+ * 4. the conversation exists and is not resumable — the resume matrix refuses it on this surface
+ *    (a fan-out cell, or a command with no row), it never had a thread, lost it, its thread was never
+ *    checkpointed, or (a GS2-106 cell only) its thread ends on an unanswered tool call — with the
+ *    reason class where it is known;
  * 5. it was recorded in another directory — the same comparison ACP's `session/new` makes.
  */
 import { resolve } from 'node:path';
@@ -34,11 +37,15 @@ import {
   type HistoryConfigView,
 } from '@gaunt-sloth/core/history/historyEnabled.js';
 import {
-  INTERACTIVE_CONVERSATION_COMMANDS,
   listResumableConversationsSafe,
   lookupConversationSafe,
   resolveConversationRefSafe,
 } from '@gaunt-sloth/core/history/recordSession.js';
+import {
+  resumeMatrixVerdict,
+  threadTail,
+  type ResumeSurface,
+} from '@gaunt-sloth/core/history/resumeMatrix.js';
 import {
   formatConversationRef,
   toConversationRef,
@@ -61,7 +68,11 @@ export interface ResumeTarget {
   summary: ConversationSummary;
   /** The recorded turns, oldest first — what the surfaces replay as restored turns. */
   turns: SessionRecord[];
-  /** The approvals granted in the conversation, to install again (Ruling 3). */
+  /**
+   * The approvals granted in the conversation, to install again (Ruling 3) — on the interactive
+   * surface only. GS2-106: a non-interactive resume never restores stored grants, so for every other
+   * surface this is empty and the store's grants are never read.
+   */
   grants: ConversationGrants;
 }
 
@@ -82,16 +93,27 @@ export type ResumeRefusal =
       id: number;
       /**
        * The reason class, where it is known:
-       * - `single-shot` — recorded by a single-shot command (`ask`, `exec`, …). Such a run keeps its
-       *   state since GS2-106, but resuming it into an interactive session is not supported: the
-       *   non-interactive resume GS2-106 adds is its own surface;
-       * - `no-thread` — an interactive conversation whose thread link is null: a checkpoint write
-       *   failed while it ran and it was marked unresumable, or it predates conversation state;
+       * - `fan-out` — one cell of a `batch`, `eval`, `gth-batch` or `workflow` run (the row has an
+       *   `origin`). GS2-106: whether a single cell can be resumed is not decided (GS2-118);
+       * - `unsupported-command` — recorded by a command the resume matrix has no row for
+       *   (`review`, `pr`, …);
+       * - `no-thread` — a conversation whose thread link is null: a checkpoint write failed while
+       *   it ran and it was marked unresumable, or it predates conversation state;
        * - `no-checkpoint` — the thread is on record but nothing was ever checkpointed under it;
+       * - `pending-tool-call` — GS2-106: the stored thread ends on a tool call that was never
+       *   answered, as a run that stopped at an approval stop leaves it;
        * - `unreadable` — the checkpoint could not be read from the store.
        */
-      reason: 'single-shot' | 'no-thread' | 'no-checkpoint' | 'unreadable';
+      reason:
+        | 'fan-out'
+        | 'unsupported-command'
+        | 'no-thread'
+        | 'no-checkpoint'
+        | 'pending-tool-call'
+        | 'unreadable';
       command?: string;
+      /** The fan-out surface, for `fan-out`. */
+      origin?: string;
     }
   | { kind: 'workspace-mismatch'; id: number; stored: string; current: string }
   /** The id resolved to the conversation the session is already in — only for a run id; see below. */
@@ -131,10 +153,15 @@ export interface ResumeSessionContext {
  * `ref` is a parsed conversation id — `parseConversationRef` in core — or a bare integer id. It is
  * resolved to a row HERE, after the history and store checks, by exact match: this is the one place
  * a resume turns what a person typed into a conversation, whichever surface they typed it on.
+ *
+ * GS2-106 — `surface` is where the resume was asked for, and it is required so that no caller can
+ * forget to say: the resume matrix in core decides per surface, and grants are restored only on the
+ * interactive one.
  */
 export async function resolveResumeTarget(
   session: ResumeSessionContext,
-  ref: ConversationRef | number
+  ref: ConversationRef | number,
+  surface: ResumeSurface
 ): Promise<ResumeResolution> {
   if (!isHistoryEnabled(session.config)) return refuse({ kind: 'history-off' });
   // Asked for and not available: the store did not open, so nothing below could be read anyway,
@@ -151,13 +178,21 @@ export async function resolveResumeTarget(
     return refuse({ kind: 'same-conversation', id });
   }
 
-  // GS2-106 — decided by the COMMAND, before the thread: a single-shot run now carries a thread and
-  // a checkpoint exactly as an interactive session does, so the thread no longer tells the two
-  // apart. Re-entering one as a chat or code session would change its mode prompt and tools under
-  // it; the non-interactive resume is its own surface.
-  const interactive = INTERACTIVE_CONVERSATION_COMMANDS.has(summary.command ?? '');
-  if (!interactive) {
-    return refuse({ kind: 'not-resumable', id, reason: 'single-shot', command: summary.command });
+  // GS2-106 — the resume matrix decides, by the recorded command and origin, before the thread: a
+  // single-shot run carries a thread and a checkpoint exactly as an interactive session does, so
+  // the thread no longer says what the conversation was. The table and why each cell is what it is
+  // are in core's `resumeMatrix.ts`; this is the one place a resume asks it.
+  const verdict = resumeMatrixVerdict(summary, surface);
+  if (!verdict.ok) {
+    // Refused on every surface alike: a fan-out cell (its command column names the MODE the cell
+    // ran under, so the origin is what identifies it) or a command with no row in the matrix.
+    return refuse({
+      kind: 'not-resumable',
+      id,
+      reason: verdict.reason,
+      command: summary.command,
+      ...(verdict.reason === 'fan-out' ? { origin: verdict.origin } : {}),
+    });
   }
   if (!summary.threadId) {
     return refuse({ kind: 'not-resumable', id, reason: 'no-thread', command: summary.command });
@@ -165,17 +200,29 @@ export async function resolveResumeTarget(
   // A thread with no checkpoint is refused exactly like a null thread: there is no state to
   // re-enter, and driving the graph on it would silently start a fresh conversation under an old
   // id — which is the one thing a resume must never do.
-  let checkpointed: boolean;
+  let tuple: Awaited<ReturnType<BaseCheckpointSaver['getTuple']>>;
   try {
-    const tuple = await session.checkpointer.saver.getTuple({
+    tuple = await session.checkpointer.saver.getTuple({
       configurable: { thread_id: summary.threadId },
     });
-    checkpointed = tuple !== undefined;
   } catch {
     return refuse({ kind: 'not-resumable', id, reason: 'unreadable', command: summary.command });
   }
-  if (!checkpointed) {
+  if (tuple === undefined) {
     return refuse({ kind: 'not-resumable', id, reason: 'no-checkpoint', command: summary.command });
+  }
+  // GS2-106 — a cell this node added also needs the thread to END cleanly. A run that stopped at an
+  // approval nobody could answer leaves an assistant tool call with no result; appending a user
+  // message to that sends the model a history real providers reject, so it is refused here rather
+  // than failing inside the provider. The existing GS2-20 cell (a chat/code conversation resumed
+  // interactively) is deliberately left as it was; the matrix marks which cells check.
+  if (verdict.requireCleanTail && threadTail(tuple) !== 'clean') {
+    return refuse({
+      kind: 'not-resumable',
+      id,
+      reason: 'pending-tool-call',
+      command: summary.command,
+    });
   }
 
   // The same comparison ACP's `session/new` makes, on resolved paths. A row with no project on
@@ -196,7 +243,13 @@ export async function resolveResumeTarget(
       threadId: summary.threadId,
       summary,
       turns,
-      grants: loadConversationGrantsSafe(session.config, id),
+      // GS2-106 — Andrew's ruling: a non-interactive resume never restores stored grants. The
+      // store is not even read for one, so no later change to how a target is applied can carry
+      // grants a person made while watching into a run nobody is watching.
+      grants:
+        surface === 'interactive'
+          ? loadConversationGrantsSafe(session.config, id)
+          : { allow: [], deny: [] },
     },
   };
 }
@@ -324,21 +377,30 @@ export function resumeRefusalNotice(
         tone: 'warn',
       };
     case 'not-resumable': {
+      // GS2-106 — the first three are the resume matrix's refusals and the thread-tail check; each
+      // says what the conversation is and that this is a rule, not a fault, since the person can do
+      // nothing about it but read the transcript.
       const why =
-        refusal.reason === 'single-shot'
-          ? `It was recorded by \`gth ${refusal.command ?? 'ask'}\`, a single-shot run, and ` +
-            'resuming a single-shot run is not supported yet.'
-          : refusal.reason === 'no-thread'
-            ? 'Its conversation state is not on record: either a checkpoint write failed while it ' +
-              'was running and it was marked unresumable, or it was recorded before conversation ' +
-              'state was kept.'
-            : refusal.reason === 'no-checkpoint'
-              ? // GS2-107 — two ways to arrive here, and the sentence has to be true of both: the
-                // session ended before it wrote anything, or `gth history prune` removed the state
-                // afterwards. Nothing on the row distinguishes them, so neither is claimed.
-                'Its conversation state is not in the store — either the session ended before its ' +
-                'first turn completed, or `gth history prune` has since removed it.'
-              : 'Its conversation state could not be read from the store.';
+        refusal.reason === 'fan-out'
+          ? `It is one cell of a \`gth ${refusal.origin ?? 'batch'}\` run. Resuming a single ` +
+            'cell of a batch, eval or workflow run is not supported.'
+          : refusal.reason === 'unsupported-command'
+            ? `It was recorded by \`gth ${refusal.command ?? 'unknown'}\`, which cannot be ` +
+              'resumed. Only conversations recorded by `ask`, `exec`, `chat` or `code` can be.'
+            : refusal.reason === 'pending-tool-call'
+              ? 'Its last turn stopped at a tool call that was never answered — the run ended at ' +
+                'an approval stop — so there is no finished turn to continue from.'
+              : refusal.reason === 'no-thread'
+                ? 'Its conversation state is not on record: either a checkpoint write failed while it ' +
+                  'was running and it was marked unresumable, or it was recorded before conversation ' +
+                  'state was kept.'
+                : refusal.reason === 'no-checkpoint'
+                  ? // GS2-107 — two ways to arrive here, and the sentence has to be true of both: the
+                    // session ended before it wrote anything, or `gth history prune` removed the state
+                    // afterwards. Nothing on the row distinguishes them, so neither is claimed.
+                    'Its conversation state is not in the store — either the session ended before its ' +
+                    'first turn completed, or `gth history prune` has since removed it.'
+                  : 'Its conversation state could not be read from the store.';
       return {
         title: `Conversation #${refusal.id} cannot be resumed`,
         lines: [why, `You can still read it with \`gth history show ${refusal.id}\`.`],
@@ -383,8 +445,8 @@ export function resumableConversationsNotice(
     return {
       title: 'No other conversation can be resumed',
       lines: [
-        'Only a conversation recorded by an interactive `chat` or `code` session that completed ' +
-          'at least one turn can be resumed, and this session is not offered to itself.',
+        'Only a conversation recorded by `ask`, `exec`, `chat` or `code` that completed at least ' +
+          'one turn can be resumed, and this session is not offered to itself.',
         'Nothing was changed.',
       ],
     };

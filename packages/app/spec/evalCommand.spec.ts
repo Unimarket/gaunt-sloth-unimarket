@@ -269,7 +269,7 @@ describe('evalCommand', () => {
     // GS2-95 — the run header says `eval` while the mode prompt stays `ask`. These two are asserted
     // together on purpose: "simplifying" the display name into the command argument would silently
     // move which system prompt every eval case runs under, and this pair is what says so.
-    expect(options).toEqual({ displayCommand: 'eval' });
+    expect(options).toEqual({ displayCommand: 'eval', origin: 'eval' });
     expect(config.writeOutputToFile).toBe(false);
     expect(agentFactory).toBe(resolvedFactory);
 

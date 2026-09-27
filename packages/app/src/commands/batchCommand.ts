@@ -85,6 +85,10 @@ export interface ProductionRunCellOptions {
    * under ANOTHER verb's mode prompt, so the header would otherwise call a `gth eval` run `ask`.
    * Changing {@link command} to fix the header would move the mode prompt with it. */
   displayCommand: string;
+  /** GS2-106 — the fan-out surface recorded as each cell's conversation `origin` (`'batch'`,
+   * `'eval'`), so every resume surface refuses a single cell. Required, and not derived from
+   * {@link displayCommand}: that one is a header's wording, and this decides a refusal. */
+  origin: string;
   /** Prefix for `runSingleShot`'s `source` naming (`<prefix>-<cell.id>`), used for output/session
    * file naming — `'BATCH'` for `batch`, `'EVAL'` for `eval`. */
   sourcePrefix: string;
@@ -152,7 +156,7 @@ export async function buildProductionRunCell(
           // batch/eval ask for the lean backend, same as exec/ask — the only one shipped;
           // config.agent.backend names no other.
           resolveAgentFactory(cellConfig, 'lean'),
-          { displayCommand: options.displayCommand }
+          { displayCommand: options.displayCommand, origin: options.origin }
         );
       // BATCH-32: `advertisedTools` is threaded through with the rest — it is `gth eval`'s coverage
       // denominator, and this adapter is the only place the agent's inventory can reach the runner.
@@ -227,7 +231,7 @@ export async function buildProductionRunConversation(
         resolvers,
         options.command,
         resolveAgentFactory(cellConfig, 'lean'),
-        { displayCommand: options.displayCommand }
+        { displayCommand: options.displayCommand, origin: options.origin }
       );
       // BATCH-32: `advertisedTools` rides along per turn (the same inventory on each — the
       // conversation builds its agent once), so a multi-turn suite contributes a denominator too.
@@ -367,6 +371,7 @@ export function batchCommand(
         command: 'exec',
         // The header says `batch`; the mode prompt stays `exec`. Do not collapse these two.
         displayCommand: 'batch',
+        origin: 'batch',
         sourcePrefix: 'BATCH',
         wrapBlockPrefix: 'script',
         wrapPrefix: 'prompt-executable script',

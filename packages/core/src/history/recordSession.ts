@@ -18,6 +18,11 @@ import type {
 import type { ConversationRef } from '#src/history/conversationRef.js';
 import { openHistoryStore, resolveHistoryDbPath } from '#src/history/historyStore.js';
 import { isHistoryEnabled } from '#src/history/historyEnabled.js';
+import {
+  RESUMABLE_RECORDED_COMMANDS,
+  RESUME_MATRIX,
+  resumeMatrixVerdict,
+} from '#src/history/resumeMatrix.js';
 
 export type { HistoryConfigView } from '#src/history/historyEnabled.js';
 import type { HistoryConfigView } from '#src/history/historyEnabled.js';
@@ -211,18 +216,26 @@ export function lookupConversationSafe(
 }
 
 /**
- * The commands whose conversations an interactive session can resume into. A conversation recorded
- * by any other command is a single-shot run: since GS2-106 it carries a thread and a checkpoint like
- * an interactive one, and resuming it is the non-interactive resume that ticket adds on its own
- * surfaces. Until then it is not offered, and not accepted, by the interactive resume.
+ * The recorded commands whose conversations an interactive session can resume into. Derived from
+ * the resume matrix (`RESUME_MATRIX` in `resumeMatrix.ts`) and kept only because it is part of the
+ * package's public surface: code inside this repository asks `resumeMatrixVerdict` instead, which
+ * also refuses a fan-out cell that a command name alone cannot identify.
  */
-export const INTERACTIVE_CONVERSATION_COMMANDS: ReadonlySet<string> = new Set(['chat', 'code']);
+export const INTERACTIVE_CONVERSATION_COMMANDS: ReadonlySet<string> = new Set(
+  RESUMABLE_RECORDED_COMMANDS.filter((command) => RESUME_MATRIX[command].interactive !== undefined)
+);
 
 /**
- * GS2-20 — the conversations a `/resume` picker may offer: the most recent interactive ones that
- * carry a thread (so a resume could actually re-enter them), minus the one the session is already
+ * GS2-20 — the conversations a `/resume` picker may offer: the most recent ones the resume matrix
+ * lets an interactive session re-enter (GS2-106 — `resumeMatrixVerdict` in `resumeMatrix.ts`, the
+ * one table every resume surface reads) that carry a thread, minus the one the session is already
  * in. `[]` when history is off or the store cannot be opened, which the caller renders as "nothing
  * to resume". Fail-soft, never throws.
+ *
+ * The listing does not read each thread's checkpoint, so it can offer an `ask`/`exec` row whose run
+ * stopped at an unanswered tool call; picking it goes through the resume seam, which refuses it with
+ * its reason. Reading every candidate's checkpoint to hide it here would put a database read per row
+ * in front of a picker that has to open instantly.
  */
 export function listResumableConversationsSafe(
   config: HistoryConfigView,
@@ -242,7 +255,7 @@ export function listResumableConversationsSafe(
         .filter(
           (c) =>
             c.threadId !== undefined &&
-            INTERACTIVE_CONVERSATION_COMMANDS.has(c.command ?? '') &&
+            resumeMatrixVerdict(c, 'interactive').ok &&
             c.id !== options.exclude
         )
         .slice(0, limit);

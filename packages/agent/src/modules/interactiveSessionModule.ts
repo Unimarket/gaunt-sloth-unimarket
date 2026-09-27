@@ -361,7 +361,8 @@ export async function createInteractiveSession(
   if (options.resumeConversationId !== undefined) {
     const resolution = await resolveResumeTarget(
       { config, checkpointer, workspace: getProjectDir() },
-      options.resumeConversationId
+      options.resumeConversationId,
+      'interactive'
     );
     if (!resolution.ok) {
       printNotice(resumeRefusalNotice(resolution.refusal));
@@ -996,7 +997,8 @@ export async function createInteractiveSession(
             } else {
               const resolution = await resolveResumeTarget(
                 { config, checkpointer, workspace: getProjectDir(), current: conversationId },
-                id
+                id,
+                'interactive'
               );
               if (!resolution.ok) {
                 printNotice(resumeRefusalNotice(resolution.refusal, { inSession: true }));

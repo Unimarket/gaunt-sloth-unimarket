@@ -1,8 +1,8 @@
 /**
  * GS2-20 fix round, finding 4 — **the root `--resume` in front of a subcommand that cannot take
  * it.** Commander accepts a root option before every subcommand, and only the session commands
- * read this one, so `gth --resume 1 ask "hello"` used to run a fresh `ask` and exit 0 without a
- * word about the conversation the person named.
+ * read this one, so `gth --resume 1 review` would run a fresh review and exit 0 without a word about
+ * the conversation the person named. Since GS2-106, `ask` and `exec` take the flag too.
  *
  * Asserted through the built CLI, because `cli.ts` parses argv and dispatches at module load:
  * there is no exported parser to call, and the option's placement on the program is only
@@ -52,22 +52,27 @@ describe('gth --resume in front of a subcommand (real CLI definition)', () => {
     return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
   };
 
-  it('refuses ask, names where --resume applies and that nothing ran, and exits 1', () => {
-    const { status, output } = runCli(['--resume', '1', 'ask', 'hello there']);
-    expect(status).toBe(1);
-    expect(output).toContain('Cannot resume into `gth ask`');
-    expect(output).toContain('`gth chat`');
-    expect(output).toContain('`gth code`');
-    expect(output).toContain('not available yet');
-    expect(output).toContain('Nothing was run, and conversation #1 was not touched.');
-  });
-
-  it('refuses exec the same way, and any other subcommand that cannot resume', () => {
-    for (const command of ['exec', 'review', 'history']) {
+  // GS2-106 — ask and exec now take `--resume`, so the root flag in front of them is no longer
+  // refused; every subcommand the matrix has no column for still is, and the sentence names the
+  // four that do rather than promising a later ticket.
+  it('refuses a subcommand that cannot resume, names the four that can, and exits 1', () => {
+    for (const command of ['review', 'history']) {
       const { status, output } = runCli(['--resume', '2', command, 'anything']);
       expect(status, command).toBe(1);
-      expect(output, command).toContain(`Cannot resume into \`gth ${command}\``);
-      expect(output, command).toContain('conversation #2 was not touched');
+      expect(output, command).toContain(
+        `Cannot resume into \`gth ${command}\`: \`--resume\` applies to \`gth ask\`, ` +
+          '`gth exec`, `gth chat`, `gth code` and the bare `gth` command.'
+      );
+      expect(output, command).toContain('Nothing was run, and conversation #2 was not touched.');
+      expect(output, command).not.toContain('not available yet');
+    }
+  });
+
+  it('does not refuse ask or exec at the root', () => {
+    for (const command of ['ask', 'exec']) {
+      const { output } = runCli(['--resume', '1', command, '--help']);
+      expect(output, command).not.toContain('Cannot resume into');
+      expect(output, command).toContain('--resume <id>');
     }
   });
 
@@ -117,10 +122,38 @@ describe('gth --resume in front of a subcommand (real CLI definition)', () => {
     });
 
     it('the refusal ENDS the run: no answer is produced and the status is not 0', () => {
-      const { status, output } = runCli(['--resume', '1', '-c', configPath, 'ask', 'hello there']);
+      const { status, output } = runCli(['--resume', '1', '-c', configPath, 'review', 'x']);
       expect(status, output).toBe(1);
-      expect(output).toContain('Cannot resume into `gth ask`');
+      expect(output).toContain('Cannot resume into `gth review`');
       // The whole point: the command the person typed did not run in place of the one they meant.
+      expect(output).not.toContain(FAKE_ANSWER);
+    });
+
+    // GS2-106 through the built CLI: `ask` records conversation #1 in the throwaway HOME's history,
+    // and both spellings of the flag continue it rather than opening a second one.
+    it('gth --resume <id> ask and gth ask --resume <id> both continue the recorded conversation', () => {
+      const first = runCli(['-c', configPath, 'ask', 'hello there']);
+      expect(first.status, first.output).toBe(0);
+
+      for (const args of [
+        ['--resume', '1', '-c', configPath, 'ask', 'and again'],
+        ['-c', configPath, 'ask', '--resume', '1', 'and once more'],
+      ]) {
+        const { status, output } = runCli(args);
+        expect(status, output).toBe(0);
+        expect(output).toContain(FAKE_ANSWER);
+        expect(output).not.toContain('Cannot resume into');
+      }
+      const list = runCli(['-c', configPath, 'history', 'list']);
+      expect(list.status, list.output).toBe(0);
+      expect(list.output).toContain('#1');
+      expect(list.output).not.toContain('#2');
+    });
+
+    it('an id that is not on record fails by name via ask, runs nothing, and exits 1', () => {
+      const { status, output } = runCli(['--resume', '9', '-c', configPath, 'ask', 'hello']);
+      expect(status, output).toBe(1);
+      expect(output).toContain('No conversation #9');
       expect(output).not.toContain(FAKE_ANSWER);
     });
   });

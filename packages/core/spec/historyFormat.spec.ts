@@ -77,6 +77,14 @@ describe('history/historyFormat', () => {
       expect(lines[0]).not.toContain('→');
     });
 
+    // GS2-106 — a fan-out cell names the run that made it beside its mode; a direct run does not.
+    it('shows a fan-out cell’s origin beside its command', () => {
+      const [cell] = formatConversationList([conv({ command: 'exec', origin: 'batch' })]);
+      expect(cell).toContain('[exec, batch cell]');
+      const [direct] = formatConversationList([conv({ command: 'exec' })]);
+      expect(direct).toContain('[exec]');
+    });
+
     it('reports an enable hint when there are no conversations', () => {
       expect(formatConversationList([])[0]).toContain('history.enabled');
     });

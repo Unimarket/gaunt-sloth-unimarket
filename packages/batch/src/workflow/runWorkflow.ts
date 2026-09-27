@@ -174,7 +174,8 @@ export async function runWorkflow(
         resolveAgentFactory(cellConfig, 'lean'),
         // GS2-95 — the header says `workflow`, whatever mode prompt the script asked for. The
         // script's `opts.command` still selects that prompt; do not collapse these two.
-        { displayCommand: 'workflow' }
+        // GS2-106 — and the conversation records the cell's origin, so no resume surface takes it.
+        { displayCommand: 'workflow', origin: 'workflow' }
       );
       if (!ok) {
         throw new Error('agent run failed');

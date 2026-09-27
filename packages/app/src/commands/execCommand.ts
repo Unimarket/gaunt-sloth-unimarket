@@ -6,8 +6,11 @@ import { getStringFromStdin, setExitCode } from '@gaunt-sloth/core/utils/systemU
 import { displayError, displayWarning } from '@gaunt-sloth/core/utils/consoleUtils.js';
 import { wrapContent } from '@gaunt-sloth/core/utils/llmUtils.js';
 import { readMultipleFilesFromProjectDir } from '@gaunt-sloth/core/utils/fileUtils.js';
+import type { ConversationRef } from '@gaunt-sloth/core/history/conversationRef.js';
+import type { SingleShotResume } from '@gaunt-sloth/core/runtime/singleShot.js';
+import { resumeOption } from '#src/commands/resumeOption.js';
 
-interface ExecCommandOptions {
+export interface ExecCommandOptions {
   file?: string[];
   /**
    * Inline prompt text. When supplied, this is used as the prompt-executable directly instead of
@@ -118,86 +121,171 @@ export function execCommand(
         '  $ gth exec -m "Summarize CHANGELOG.md in three bullets" -t 0\n' +
         '  $ cat scripts/lint-summary.md | gth exec\n' +
         '  $ gth exec scripts/build-fix.md -f error.log package.json\n' +
-        '  $ gth exec scripts/release-notes.md -w RELEASE_NOTES.md\n'
+        '  $ gth exec scripts/release-notes.md -w RELEASE_NOTES.md\n' +
+        '  $ gth exec --resume <run id> -m "now do the same for the tests"\n'
     )
-    .action(async (script: string | undefined, options: ExecCommandOptions) => {
-      // -m and a positional script path are mutually exclusive: keep path-vs-text unambiguous.
-      if (script && options.message !== undefined) {
-        throw new Error('Pass either a [script] path or -m/--message inline text, not both.');
-      }
-
-      const config = await initConfig(commandLineConfigOverrides);
-
-      const content: string[] = [];
-
-      // Extra context files are prepended (same convention as `ask`).
-      if (options.file) {
-        const fileContent = readMultipleFilesFromProjectDir(options.file);
-        if (fileContent) {
-          content.push(fileContent);
-        }
-      }
-
-      // The script itself, in precedence order:
-      //   1. -m/--message inline text (explicit; wins over stdin)
-      //   2. a [script] file path argument
-      //   3. stdin (pipe)
-      const stringFromStdin = getStringFromStdin();
-      if (options.message !== undefined) {
-        content.push(wrapContent(options.message, 'script', 'prompt-executable script', true));
-      } else if (script) {
-        const scriptContent = readMultipleFilesFromProjectDir([script]);
-        content.push(wrapContent(scriptContent, 'script', 'prompt-executable script', true));
-      } else if (stringFromStdin) {
-        content.push(wrapContent(stringFromStdin, 'script', 'prompt-executable script', true));
-      }
-
-      if (content.length === 0) {
-        throw new Error(
-          'A script is required: pass a .md path, inline text with -m, pipe it on stdin, or supply it with -f'
+    .addOption(resumeOption())
+    .action(
+      async (
+        script: string | undefined,
+        options: ExecCommandOptions & { resume?: ConversationRef }
+      ) => {
+        // GS2-106 — `--resume` on `exec` itself, or the root `gth --resume <id> exec …`.
+        const ref =
+          options.resume ?? (program.getOptionValue('resume') as ConversationRef | undefined);
+        await runExecCommand(
+          script,
+          options,
+          commandLineConfigOverrides,
+          ref === undefined ? undefined : { ref, surface: 'exec' }
         );
       }
+    );
+}
 
-      if (options.allowDir && options.allowDir.length > 0) {
-        displayWarning(
-          `--allow-dir has no effect in this release: ${options.allowDir.join(', ')} stays ` +
-            'outside the sandbox. The agent reads and writes within the working directory only.'
-        );
+/**
+ * GS2-106 — the input refusal for `exec --resume`, or `null` when the input is acceptable.
+ *
+ * A resumed `exec` takes its new input from `-m` and nothing else. What `exec` should do when its
+ * FILE input is the same as the original run's is undecided on the node, so a script path, `-f`
+ * and a script piped on stdin are all refused rather than guessed at. With `-m` given, stdin is
+ * ignored exactly as a plain `exec -m` ignores it, so it is refused only where it would have been
+ * the script.
+ */
+function execResumeInputRefusal(
+  script: string | undefined,
+  options: ExecCommandOptions
+): string | null {
+  const why = (what: string) =>
+    `\`gth exec --resume\` takes its new input only from -m; ${what} cannot be given with it. ` +
+    'Nothing was run.';
+  if (script) return why('a script path');
+  if (options.file && options.file.length > 0) return why('-f files');
+  if (options.message === undefined && getStringFromStdin()) return why('a script piped on stdin');
+  if (options.message === undefined) {
+    return (
+      '`gth exec --resume` needs the new message as -m, for example ' +
+      '`gth exec --resume <id> -m "…"`. Nothing was run.'
+    );
+  }
+  return null;
+}
+
+/**
+ * The body of `gth exec`, shared with `gth history resume` for a conversation recorded by `exec`
+ * (GS2-106), so both spellings run exactly one implementation.
+ *
+ * `resume`, when given, continues that conversation with `-m` as the new user message; see
+ * {@link execResumeInputRefusal} for the input it refuses. The seam resolves and checks the
+ * conversation first, and a refusal ends the command with exit status 1 and nothing run.
+ */
+export async function runExecCommand(
+  script: string | undefined,
+  options: ExecCommandOptions,
+  commandLineConfigOverrides: CommandLineConfigOverrides,
+  resume?: { ref: ConversationRef | number; surface: 'exec' | 'history' }
+): Promise<void> {
+  // -m and a positional script path are mutually exclusive: keep path-vs-text unambiguous.
+  if (script && options.message !== undefined) {
+    throw new Error('Pass either a [script] path or -m/--message inline text, not both.');
+  }
+
+  if (resume) {
+    // Refused before any config is loaded: the input is wrong whatever the conversation is.
+    const refusal = execResumeInputRefusal(script, options);
+    if (refusal) {
+      displayError(refusal);
+      setExitCode(1);
+      return;
+    }
+  }
+
+  const config = await initConfig(commandLineConfigOverrides);
+
+  const content: string[] = [];
+
+  // Extra context files are prepended (same convention as `ask`).
+  if (options.file) {
+    const fileContent = readMultipleFilesFromProjectDir(options.file);
+    if (fileContent) {
+      content.push(fileContent);
+    }
+  }
+
+  // The script itself, in precedence order:
+  //   1. -m/--message inline text (explicit; wins over stdin)
+  //   2. a [script] file path argument
+  //   3. stdin (pipe)
+  const stringFromStdin = getStringFromStdin();
+  if (options.message !== undefined) {
+    content.push(wrapContent(options.message, 'script', 'prompt-executable script', true));
+  } else if (script) {
+    const scriptContent = readMultipleFilesFromProjectDir([script]);
+    content.push(wrapContent(scriptContent, 'script', 'prompt-executable script', true));
+  } else if (stringFromStdin) {
+    content.push(wrapContent(stringFromStdin, 'script', 'prompt-executable script', true));
+  }
+
+  if (content.length === 0) {
+    throw new Error(
+      'A script is required: pass a .md path, inline text with -m, pipe it on stdin, or supply it with -f'
+    );
+  }
+
+  if (options.allowDir && options.allowDir.length > 0) {
+    displayWarning(
+      `--allow-dir has no effect in this release: ${options.allowDir.join(', ')} stays ` +
+        'outside the sandbox. The agent reads and writes within the working directory only.'
+    );
+  }
+
+  const execConfig = buildExecConfig(config, options, commandLineConfigOverrides);
+
+  let target: SingleShotResume | undefined;
+  if (resume) {
+    const { resolveSingleShotResume } = await import('#src/commands/singleShotResume.js');
+    const resolved = await resolveSingleShotResume(execConfig, resume.ref, resume.surface);
+    if (!resolved) {
+      // Refused by the seam, which has said why. Nothing ran.
+      setExitCode(1);
+      return;
+    }
+    target = resolved;
+  }
+
+  const { runSingleShot } = await import('@gaunt-sloth/core/runtime/singleShot.js');
+  const { createResolvers } = await import('@gaunt-sloth/agent/resolvers.js');
+  const { resolveAgentFactory } = await import('@gaunt-sloth/agent/core/resolveAgentFactory.js');
+
+  let ok = false;
+  try {
+    ({ ok } = await runSingleShot(
+      'EXEC',
+      getExecSystemPrompt(execConfig),
+      content.join('\n'),
+      execConfig,
+      createResolvers(),
+      'exec',
+      // exec asks for the lean backend, the only one shipped; config.agent.backend names no other.
+      resolveAgentFactory(execConfig, 'lean'),
+      // [[EXT-158]] — the same reading as `ask`: a person is watching this verb. The notice
+      // goes to stderr, so a script piping `exec`'s stdout sees byte-for-byte what it did.
+      //
+      // [[EXT-178]] — and eligible for the end-of-run recap, which shares that property: it is
+      // rendered on stderr and the answer on stdout is untouched. Whether one is produced is
+      // the user's `recap` rung, `off` by default.
+      {
+        announceOutstandingWork: true,
+        announceRunRecap: true,
+        ...(target ? { resume: target } : {}),
       }
+    ));
+  } catch (error) {
+    displayError(error instanceof Error ? error.message : String(error));
+    ok = false;
+  }
 
-      const execConfig = buildExecConfig(config, options, commandLineConfigOverrides);
-
-      const { runSingleShot } = await import('@gaunt-sloth/core/runtime/singleShot.js');
-      const { createResolvers } = await import('@gaunt-sloth/agent/resolvers.js');
-      const { resolveAgentFactory } =
-        await import('@gaunt-sloth/agent/core/resolveAgentFactory.js');
-
-      let ok = false;
-      try {
-        ({ ok } = await runSingleShot(
-          'EXEC',
-          getExecSystemPrompt(execConfig),
-          content.join('\n'),
-          execConfig,
-          createResolvers(),
-          'exec',
-          // exec asks for the lean backend, the only one shipped; config.agent.backend names no other.
-          resolveAgentFactory(execConfig, 'lean'),
-          // [[EXT-158]] — the same reading as `ask`: a person is watching this verb. The notice
-          // goes to stderr, so a script piping `exec`'s stdout sees byte-for-byte what it did.
-          //
-          // [[EXT-178]] — and eligible for the end-of-run recap, which shares that property: it is
-          // rendered on stderr and the answer on stdout is untouched. Whether one is produced is
-          // the user's `recap` rung, `off` by default.
-          { announceOutstandingWork: true, announceRunRecap: true }
-        ));
-      } catch (error) {
-        displayError(error instanceof Error ? error.message : String(error));
-        ok = false;
-      }
-
-      if (!ok) {
-        setExitCode(1);
-      }
-    });
+  if (!ok) {
+    setExitCode(1);
+  }
 }

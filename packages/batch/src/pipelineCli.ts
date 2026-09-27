@@ -291,7 +291,8 @@ async function buildProductionRunCell(
         resolveAgentFactory(cellConfig, 'lean'),
         // GS2-95 — the header names the bin the user invoked, not the `exec` mode prompt its cells
         // run under. Do not collapse these two.
-        { displayCommand: 'gth-batch' }
+        // GS2-106 — and the conversation records the cell's origin, so no resume surface takes it.
+        { displayCommand: 'gth-batch', origin: 'gth-batch' }
       );
       return { ok, answer, tokensInput, tokensOutput, tools };
     } catch (error) {

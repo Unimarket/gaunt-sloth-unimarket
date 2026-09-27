@@ -185,9 +185,10 @@ if (commandSkipsStdin(invokedCommand)) {
 }
 
 // GS2-20 — the root `--resume` belongs to the bare command (a code session) and rides along for
-// `chat`/`code`; in front of any other subcommand it would be accepted and silently dropped, and a
-// fresh `ask`/`exec` would run as though nothing had been asked. Refused here, once, before the
-// subcommand's action can run: a typed intent is never answered with a different command.
+// the resumable subcommands (`chat`/`code`, and since GS2-106 `ask`/`exec`); in front of any other
+// subcommand it would be accepted and silently dropped, and a fresh run would start as though
+// nothing had been asked. Refused here, once, before the subcommand's action can run: a typed
+// intent is never answered with a different command.
 const rootResume = program.getOptionValue('resume') as ConversationRef | undefined;
 if (
   rootResume !== undefined &&

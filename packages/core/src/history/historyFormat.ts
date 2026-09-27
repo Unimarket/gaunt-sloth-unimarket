@@ -89,7 +89,9 @@ export function formatConversationList(
     } else {
       parts.push(c.lastTs ?? c.firstTs ?? c.startedTs);
     }
-    if (c.command) parts.push(`[${c.command}]`);
+    // GS2-106 — a fan-out cell names its origin beside the mode it ran under, so the listing does
+    // not present one cell of a `gth batch` as a `gth exec` somebody typed.
+    if (c.command) parts.push(c.origin ? `[${c.command}, ${c.origin} cell]` : `[${c.command}]`);
     if (c.model) parts.push(c.model);
     parts.push(`(${c.turnCount} ${c.turnCount === 1 ? 'turn' : 'turns'})`);
     lines.push(parts.join('  '));

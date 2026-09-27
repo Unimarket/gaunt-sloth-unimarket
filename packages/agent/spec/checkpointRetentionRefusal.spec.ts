@@ -109,7 +109,8 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
     for (let id = 1; id <= liveId + 3; id++) {
       const resolution = await resolveResumeTarget(
         { config, checkpointer: ckpt, workspace: '/work/here' },
-        id
+        id,
+        'interactive'
       );
       if (resolution.ok) reachable.push(resolution.target.threadId);
     }
@@ -135,7 +136,8 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
     // doing, not the seam refusing whatever it is handed.
     const before = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(before.ok).toBe(true);
     expect(unaddressable()).toEqual([]);
@@ -145,7 +147,8 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
 
     const after = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(after).toEqual({
       ok: false,
@@ -175,7 +178,13 @@ describe('GS2-107 — what automatic reclamation deletes was already unresumable
     db.close();
 
     expect(
-      (await resolveResumeTarget({ config, checkpointer: ckpt, workspace: '/work/here' }, id)).ok
+      (
+        await resolveResumeTarget(
+          { config, checkpointer: ckpt, workspace: '/work/here' },
+          id,
+          'interactive'
+        )
+      ).ok
     ).toBe(true);
   });
 });

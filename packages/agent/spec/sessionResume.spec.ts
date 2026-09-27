@@ -109,7 +109,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     const id = await seedResumable(ckpt.saver);
     const result = await resolveResumeTarget(
       { config: off, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({ ok: false, refusal: { kind: 'history-off' } });
     const notice = resumeRefusalNotice({ kind: 'history-off' });
@@ -127,7 +128,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
         checkpointer: { saver: ckpt.saver, durable: false },
         workspace: '/work/here',
       },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({ ok: false, refusal: { kind: 'store-unavailable' } });
     expect(resumeRefusalNotice({ kind: 'store-unavailable' }).title).toContain('did not open');
@@ -138,7 +140,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     await seedResumable(ckpt.saver);
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      4242
+      4242,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
@@ -156,23 +159,25 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     ).toContain('/resume with no id');
   });
 
-  it('4a — a single-shot row (no thread) is refused with its command named', async () => {
+  // GS2-106 — an ask row is no longer refused for being an ask row: the matrix lets an interactive
+  // session take it. One recorded with no thread (history on, store failed to open) is refused for
+  // that, the same as an interactive row that lost its thread.
+  it('4a — a single-shot row with no thread is refused because it has no thread, not for its command', async () => {
     const ckpt = durable();
     const id = recordSessionSafe(config, { command: 'ask', prompt: 'p', response: 'r' })!;
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
-      refusal: { kind: 'not-resumable', id, reason: 'single-shot', command: 'ask' },
+      refusal: { kind: 'not-resumable', id, reason: 'no-thread', command: 'ask' },
     });
     const notice = resumeRefusalNotice(
       (result as { refusal: Parameters<typeof resumeRefusalNotice>[0] }).refusal
     );
     expect(notice.title).toBe(`Conversation #${id} cannot be resumed`);
-    expect(notice.lines[0]).toContain('`gth ask`');
-    expect(notice.lines[0]).toContain('single-shot');
     expect(notice.lines.join(' ')).toContain(`gth history show ${id}`);
   });
 
@@ -183,7 +188,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     markConversationUnresumableSafe(config, id);
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
@@ -204,7 +210,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     recordSessionSafe(config, { conversationId: id, prompt: 'p', response: 'r' });
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
@@ -223,7 +230,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     await checkpoint(ckpt.saver, 'thread-never-written');
     const after = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(after.ok).toBe(true);
   });
@@ -238,7 +246,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     } as unknown as BaseCheckpointSaver;
     const result = await resolveResumeTarget(
       { config, checkpointer: { saver: broken, durable: true }, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
@@ -251,7 +260,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     const id = await seedResumable(ckpt.saver, { project: '/work/here' });
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/elsewhere' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({
       ok: false,
@@ -275,7 +285,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     saveConversationGrantsSafe(config, id, { allow: [grant('git status')], deny: [] });
     const match = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(match.ok).toBe(true);
     const target = (match as { target: ResumeTarget }).target;
@@ -297,7 +308,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     await checkpoint(ckpt.saver, 'thread-noproj');
     const result = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/anywhere' },
-      id
+      id,
+      'interactive'
     );
     expect(result.ok).toBe(true);
   });
@@ -311,7 +323,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     const id = await seedResumable(ckpt.saver);
     const result = await resolveResumeTarget(
       { config: off, checkpointer: { saver: ckpt.saver, durable: false }, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     expect(result).toEqual({ ok: false, refusal: { kind: 'history-off' } });
   });
@@ -326,7 +339,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
       const id = await seedResumable(ckpt.saver, { project, threadId: `thread-spelling-${i}` });
       const result = await resolveResumeTarget(
         { config, checkpointer: ckpt, workspace: '/work/here' },
-        id
+        id,
+        'interactive'
       );
       expect(result.ok, `stored as ${project}`).toBe(true);
     }
@@ -334,13 +348,15 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     const id = await seedResumable(ckpt.saver, { project: '/work/here', threadId: 'thread-ws' });
     const loose = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/./here/' },
-      id
+      id,
+      'interactive'
     );
     expect(loose.ok).toBe(true);
     // CONTROL — a genuinely different directory spelled loosely is still a mismatch.
     const other = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/./elsewhere/' },
-      id
+      id,
+      'interactive'
     );
     expect(other.ok).toBe(false);
   });
@@ -358,7 +374,8 @@ describe('sessionResume — resolveResumeTarget, the checks in order', () => {
     saveConversationGrantsSafe(config, id, { allow: [], deny: [grant('rm -rf build')] });
     const resolution = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: '/work/here' },
-      id
+      id,
+      'interactive'
     );
     const target = (resolution as { target: ResumeTarget }).target;
     const runner = { resumeConversation: vi.fn() };
@@ -595,7 +612,8 @@ describe('sessionResume — GS2-113, what the resumed banner says about the stor
   ): Promise<string> => {
     const resolved = await resolveResumeTarget(
       { config, checkpointer: ckpt, workspace: getProjectDir() },
-      id
+      id,
+      'interactive'
     );
     expect(resolved.ok).toBe(true);
     return resumedConversationNotice((resolved as { target: ResumeTarget }).target).lines[0];
@@ -667,14 +685,16 @@ describe('sessionResume — GS2-113, what the resumed banner says about the stor
       // make it one.
       const allowed = await resolveResumeTarget(
         { config, checkpointer: ckpt, workspace: getProjectDir() },
-        mine
+        mine,
+        'interactive'
       );
       expect(allowed.ok).toBe(true);
 
       // Recorded under another project root: still refused, still naming both paths.
       const refused = await resolveResumeTarget(
         { config, checkpointer: ckpt, workspace: getProjectDir() },
-        theirs
+        theirs,
+        'interactive'
       );
       expect(refused).toEqual({
         ok: false,
@@ -707,7 +727,8 @@ describe('sessionResume — GS2-113, what the resumed banner says about the stor
       const theirs = await openAsProductionDoes(ckpt.saver, 'thread-other-114', otherRoot);
       const refused = await resolveResumeTarget(
         { config, checkpointer: ckpt, workspace: getProjectDir() },
-        theirs
+        theirs,
+        'interactive'
       );
       expect(refused).toEqual({
         ok: false,
