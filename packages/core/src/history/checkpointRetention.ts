@@ -107,7 +107,7 @@ import {
   threadIdOfFile,
   type ThreadFileEntry,
 } from '#src/history/historyFiles.js';
-import { historyStorePaths, threadFilePath } from '#src/history/historyLayout.js';
+import { historyStorePaths, threadFileName, threadFilePath } from '#src/history/historyLayout.js';
 import {
   THREAD_SCHEMA_STEPS,
   closeQuietly,
@@ -363,6 +363,18 @@ function withIndex<T>(storePath: string, fallback: T, read: (index: DatabaseSync
   }
 }
 
+/** The ids of every conversation record file the index knows. */
+function recordFileIds(index: DatabaseSync): string[] {
+  return (
+    index
+      .prepare(
+        `SELECT DISTINCT home_thread FROM conversations
+          WHERE home_thread IS NOT NULL AND home_thread <> ''`
+      )
+      .all() as Record<string, unknown>[]
+  ).map((r) => String(r.home_thread));
+}
+
 /** The set {@link NAMED_THREADS_SQL} answers. */
 function namedThreads(index: DatabaseSync): Set<string> {
   return new Set(
@@ -395,8 +407,17 @@ export function findUnaddressableThreads(
   const excluded = new Set(options.excludeThreadIds ?? []);
   return withIndex(storePath, [] as string[], (index) => {
     const named = namedThreads(index);
+    // GS2-107 finding C, per file: this pass runs at every session exit, so it must not open every
+    // file in the store. A file whose name belongs to a named thread, a conversation's record or an
+    // excluded thread cannot be offered, so it is skipped by name and only the rest are opened.
+    const skipped = new Set(
+      [...named, ...recordFileIds(index), ...excluded].map((id) => threadFileName(id))
+    );
     const threads: string[] = [];
-    for (const facts of allThreadFacts(storePath, !options.includeWithinGrace)) {
+    for (const entry of listThreadFiles(storePath)) {
+      if (skipped.has(entry.name)) continue;
+      const facts = readThreadFacts(entry, !options.includeWithinGrace);
+      if (facts === undefined) continue;
       if (named.has(facts.threadId) || excluded.has(facts.threadId)) continue;
       if (facts.checkpointCount === 0) continue;
       if (!options.includeWithinGrace) {
