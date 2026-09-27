@@ -169,7 +169,12 @@ describe('[[EXT-203]] no request ends with a model turn, and the run ends with i
     ({ GthAgentRunner } = await import('#src/core/GthAgentRunner.js'));
   });
 
+  // win32 refuses to delete a directory holding an open database file, so close every saver first.
+  let openSavers: { close(): void }[] = [];
+
   afterEach(() => {
+    for (const saver of openSavers) saver.close();
+    openSavers = [];
     rmSync(dir, { recursive: true, force: true });
     setProjectDir(priorProjectDir);
   });
@@ -180,6 +185,7 @@ describe('[[EXT-203]] no request ends with a model turn, and the run ends with i
     if (kind === 'memory') return new MemorySaver();
     const saver = openCheckpointSaver(join(dir, 'history.db'));
     if (!saver) throw new Error('the sqlite checkpoint saver did not open');
+    openSavers.push(saver);
     return saver;
   }
 
