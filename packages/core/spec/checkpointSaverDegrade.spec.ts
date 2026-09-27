@@ -518,9 +518,12 @@ describe('GS2-117: a checkpoint write that fails mid-run does not change what th
         threadId: thread,
         approvals: 'write',
       });
-      const drain = (two as unknown as { resolveToolInterrupts: () => Promise<string> })
-        .resolveToolInterrupts;
-      const resumed = await drain.call(two);
+      const drain = (
+        two as unknown as {
+          resolveToolInterrupts: () => Promise<{ text: string; exhausted: boolean }>;
+        }
+      ).resolveToolInterrupts;
+      const { text: resumed } = await drain.call(two);
       expect(toolCalls).toBe(1);
       expect(resumed).toContain(`looked it up: ${SECRET}`);
       expect(model.lastCallSawToolResult()).toBe(true);

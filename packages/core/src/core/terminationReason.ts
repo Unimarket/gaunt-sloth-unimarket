@@ -107,6 +107,12 @@ export type GthTerminationSite =
   | 'runner.completed'
   /** The streamed turn was empty and the non-streaming fallback was empty too. */
   | 'runner.empty-after-fallback'
+  /**
+   * [[EXT-203]] — the streamed turn was empty and the non-streaming fallback was NOT spent,
+   * because the thread already ends with the model's own turn and re-sending it would call the
+   * provider on a history ending with a model message.
+   */
+  | 'runner.empty-stream'
   /** The non-streaming turn produced no content. */
   | 'runner.empty-invoke'
   /** An approvals stop re-thrown out of the stream drain. */
