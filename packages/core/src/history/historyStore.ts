@@ -16,7 +16,7 @@
  *   locked store therefore can never abort or alter a run — it just means no history for that run.
  *
  * GS2-121 — the store is a directory: this class reads and writes its `index.db`, and writes each
- * conversation's durable record into the conversation's home thread file in the same commit. The
+ * conversation's durable record into that conversation's own record file in the same commit. The
  * layout, what `history.dbPath` means, and why the index is only a cache are set out in
  * `historyLayout.ts`.
  *
@@ -294,7 +294,7 @@ export class HistoryStore {
   }
 
   /**
-   * Run `write` with the home thread file of a conversation ATTACHed as `home`, so the writes to it
+   * Run `write` with the record file of a conversation ATTACHed as `home`, so the writes to it
    * and to the index commit together. `write` is told whether `home` is there: an in-memory store,
    * or a conversation row with no home, writes the index alone.
    *
@@ -316,7 +316,7 @@ export class HistoryStore {
     }
   }
 
-  /** The home thread of one conversation, or `null` when it has none or does not exist. */
+  /** The record file id of one conversation, or `null` when it has none or does not exist. */
   private homeOf(conversationId: number): string | null {
     const row = this.db
       .prepare(`SELECT home_thread FROM conversations WHERE id = ?`)
@@ -335,6 +335,18 @@ export class HistoryStore {
     return this.storePath === null || existsSync(threadFilePath(this.storePath, threadId));
   }
 
+  /**
+   * Create the file of the thread a new conversation names, before the index row that names it is
+   * written — rule 1's "thread file first". Without it a conversation opened before its thread's
+   * first checkpoint would read as having lost its thread, and a session that ends before its first
+   * turn would leave a conversation that can never be resumed. Throws like `ensureThreadFile`; the
+   * callers are fail-soft.
+   */
+  private ensureNamedThread(threadId: string | null | undefined): void {
+    if (this.storePath === null || threadId == null || threadId.length === 0) return;
+    ensureThreadFile(this.storePath, threadId);
+  }
+
   /** A stored `thread_id` as the link a reader may follow, or `undefined` when there is none. */
   private liveThread(value: unknown): string | undefined {
     if (value == null) return undefined;
@@ -344,7 +356,7 @@ export class HistoryStore {
   }
 
   /**
-   * Write one conversation row into the index and its home file, in the transaction the caller
+   * Write one conversation row into the index and its record file, in the transaction the caller
    * holds. Returns the new id.
    */
   private insertConversation(
@@ -397,9 +409,10 @@ export class HistoryStore {
    */
   openConversation(meta: ConversationMeta = {}): number | null {
     try {
-      // GS2-121 — the conversation's home is the thread it is opened on, so its record lives beside
-      // that thread's checkpoints; one opened without a thread gets a file of its own.
-      const home = meta.threadId ?? randomUUID();
+      // GS2-121 — the conversation's record lives in a record file of its own, never in the file of
+      // the thread it names, so a prune can delete that thread's file whole.
+      const home = randomUUID();
+      this.ensureNamedThread(meta.threadId);
       return this.withHome(home, (attached) =>
         this.inTransaction(() =>
           this.insertConversation(attached, {
@@ -500,7 +513,7 @@ export class HistoryStore {
    * one into a session that is already degraded.
    */
   clearConversationThread(conversationId: number): void {
-    // GS2-121 — cut in the home file's record too, or a rebuild of the index would restore the link
+    // GS2-121 — cut in the record file too, or a rebuild of the index would restore the link
     // and make the truncated conversation resumable again. The write that failed was very likely
     // to this same disk, though, so when the two cannot be written together the index alone is
     // cut: that is the half every resume reads. The residual is stated at `historyLayout.ts`.
@@ -640,11 +653,11 @@ export class HistoryStore {
     try {
       const ts = rec.ts ?? new Date().toISOString();
       const tools = rec.tools && rec.tools.length > 0 ? JSON.stringify(rec.tools) : null;
-      // GS2-121 — the turn's durable copy goes to its conversation's home thread file, in the
-      // same commit as the index row. A fresh conversation's home is the run's thread when it was
-      // checkpointed, and a file of its own when it was not.
+      // GS2-121 — the turn's durable copy goes to its conversation's record file, in the same
+      // commit as the index row. A fresh conversation gets a record file of its own.
       const existingId = rec.conversationId ?? null;
-      const home = existingId == null ? (rec.threadId ?? randomUUID()) : this.homeOf(existingId);
+      const home = existingId == null ? randomUUID() : this.homeOf(existingId);
+      if (existingId == null) this.ensureNamedThread(rec.threadId);
       return this.withHome(home, (attached) =>
         this.inTransaction((): RecordedTurn => {
           // GS2-19: every turn belongs to a conversation. When the caller opened one up-front

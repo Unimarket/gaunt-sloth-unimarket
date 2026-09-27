@@ -299,8 +299,9 @@ export function historyCommand(
             return;
           }
           const before = maintenance.diskBytes();
-          // GS2-121 — each thread's state is its own file: removing it deletes the file, or strips
-          // and compacts a conversation's home file, so the space comes back thread by thread.
+          // GS2-121 — each thread's state is its own file, and removing it deletes that file, so the
+          // space comes back thread by thread with no store-wide VACUUM. Transcripts are in the
+          // conversations' record files, which this never touches.
           const removed = maintenance.remove([
             ...candidates.map((c) => c.threadId),
             ...unaddressable,

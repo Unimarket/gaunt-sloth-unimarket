@@ -854,8 +854,7 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
   }
 
   /**
-   * Delete a thread's state from memory and from disk — its file, or, when the file is a
-   * conversation's home, its checkpoints and pending writes (see `removeThreadState`).
+   * Delete a thread's state from memory and from disk: its file, whole (see `removeThreadState`).
    */
   async deleteThread(threadId: string): Promise<void> {
     this.mirror.deleteThread(threadId);

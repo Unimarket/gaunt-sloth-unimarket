@@ -40,9 +40,9 @@
  *    row whose file has not been written.
  * 5. Delete `<store>.pre-split`, then the lock.
  *
- * A conversation's home thread is the thread it names; a conversation that names none (recorded
- * without a checkpointer, or whose link was cut) is given `legacy-conversation-<id>`, which is
- * deterministic, so a resumed split puts it in the same file the first attempt did.
+ * Every conversation's record goes to a record file of its own, `legacy-conversation-<id>`, never
+ * to the file of the thread it names. The name is deterministic, so a resumed split puts each
+ * record in the same file the first attempt did.
  */
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -146,13 +146,14 @@ const CHECKPOINT_TABLES_DDL = `
 `;
 
 /**
- * The index's schema. `home_thread` names the thread file holding the conversation's durable
- * record; `thread_id` is the resume link, which may be cut (set NULL) while the home stays.
+ * The index's schema. `home_thread` names the record file holding the conversation's durable
+ * record; `thread_id` is the resume link, which may be cut (set NULL) while the record stays.
  */
 export const INDEX_SCHEMA_STEPS: readonly SchemaStep[] = Object.freeze([
   {
     version: 1,
-    describe: 'conversations, sessions and their full-text index, with each conversation home file',
+    describe:
+      'conversations, sessions and their full-text index, with each conversation record file',
     up(db: DatabaseSync) {
       db.exec(conversationTablesDdl(',\n    home_thread TEXT'));
       db.exec(`
@@ -166,13 +167,14 @@ export const INDEX_SCHEMA_STEPS: readonly SchemaStep[] = Object.freeze([
 ]);
 
 /**
- * A thread file's schema: the thread's checkpoint tables, its own id, and the durable record of
- * every conversation whose home it is.
+ * The schema of a file in `threads/`: its own id, the checkpoint tables a thread file fills, and
+ * the record tables a conversation's record file fills. One schema for both kinds, so both are
+ * opened, migrated and rebuilt the same way.
  */
 export const THREAD_SCHEMA_STEPS: readonly SchemaStep[] = Object.freeze([
   {
     version: 1,
-    describe: 'checkpoints and pending writes of one thread, and its conversations and turns',
+    describe: 'checkpoints and pending writes of one thread, or one conversation and its turns',
     up(db: DatabaseSync) {
       db.exec(CHECKPOINT_TABLES_DDL);
       db.exec(`
@@ -351,10 +353,10 @@ function upgradeLegacyStore(db: DatabaseSync): void {
   }
 }
 
-/** The prefix of the home thread the split gives a conversation that names no thread. */
+/** The prefix of the record file id the split gives each conversation. */
 const LEGACY_HOME_PREFIX = 'legacy-conversation-';
 
-/** The home thread the split gives a conversation that names no thread. Deterministic on purpose. */
+/** The record file id the split gives a conversation. Deterministic on purpose. */
 export function legacyHomeThread(conversationId: number): string {
   return `${LEGACY_HOME_PREFIX}${conversationId}`;
 }
@@ -420,7 +422,10 @@ function count(db: DatabaseSync, sql: string, ...params: (string | number)[]): n
   return Number(row?.n ?? 0);
 }
 
-/** Copy one thread, and every conversation whose home it is, out of the ATTACHed old file. */
+/**
+ * Copy one file's worth out of the ATTACHed old file: a thread's checkpoints and pending writes, or
+ * a conversation's record and turns (`homedConversations`).
+ */
 function copyThread(
   storePath: string,
   preSplit: string,
@@ -524,8 +529,7 @@ function buildIndexFromLegacy(target: string, preSplit: string): void {
              (id, started_ts, project, command, model, thread_id, grants, run_id, origin,
               home_thread)
            SELECT id, started_ts, project, command, model, thread_id, grants, run_id, origin,
-                  CASE WHEN thread_id IS NULL OR thread_id = ''
-                       THEN ? || id ELSE thread_id END
+                  ? || id
              FROM legacy.conversations`
         ).run(LEGACY_HOME_PREFIX);
         db.exec(
@@ -598,7 +602,9 @@ export function splitLegacyStore(storePath: string): boolean {
     if (statKind(storePath) === 'absent') mkdirSync(storePath);
     if (statKind(paths.threads) === 'absent') mkdirSync(paths.threads);
 
-    // Which conversation lives in which thread file. Conversation rows only, never a blob.
+    // Which file each conversation's record goes to: a record file of its own, never the file of
+    // the thread it names, so a prune can delete that thread's file whole (see `historyLayout.ts`).
+    // Conversation rows only, never a blob.
     const source = openConnection(paths.preSplit, { readOnly: true });
     const homes = new Map<string, number[]>();
     try {
@@ -606,13 +612,14 @@ export function splitLegacyStore(storePath: string): boolean {
         .prepare(`SELECT id, thread_id FROM conversations ORDER BY id`)
         .all() as Record<string, unknown>[]) {
         const id = Number(row.id);
-        const threadId =
-          row.thread_id != null && String(row.thread_id).length > 0
-            ? String(row.thread_id)
-            : legacyHomeThread(id);
-        const list = homes.get(threadId) ?? [];
+        const home = legacyHomeThread(id);
+        const list = homes.get(home) ?? [];
         list.push(id);
-        homes.set(threadId, list);
+        homes.set(home, list);
+        // A named thread gets its file even with no checkpoint in the old store, exactly as a live
+        // conversation's does, or the split would turn it into one whose thread was lost.
+        const threadId = row.thread_id != null ? String(row.thread_id) : '';
+        if (threadId.length > 0 && !homes.has(threadId)) homes.set(threadId, []);
       }
       for (const row of source
         .prepare(

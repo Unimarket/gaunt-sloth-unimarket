@@ -31,11 +31,15 @@
  *
  * ## What "removing a thread's state" is, file by file
  *
- * {@link removeThreadState} is the one implementation. A thread file that holds **no conversation
- * record** is deleted whole. A thread file that is some conversation's **home** — it carries that
- * conversation's durable row and turns (see `historyLayout.ts`) — keeps them, loses every checkpoint
- * and pending write, and is vacuumed, so a pruned conversation keeps its transcript and the index
- * can still be rebuilt with it in. The bytes come back either way.
+ * {@link removeThreadState} is the one implementation, and it **deletes the thread's file whole**. A
+ * conversation's transcript is not in that file: it is in the conversation's own record file (see
+ * `historyLayout.ts`), which no pass here touches, so a pruned conversation keeps its transcript and
+ * the index can still be rebuilt with it in.
+ *
+ * The one exception is a file that cannot be deleted, or that holds a conversation record as well
+ * as checkpoints (this release never writes one; a hand-built or damaged store could hold one). That
+ * file keeps its records, loses every checkpoint and pending write in one transaction, and is
+ * vacuumed. The bytes come back either way.
  *
  * ## The predicate: one class, not two
  *
@@ -234,7 +238,7 @@ interface ThreadFacts {
   writeCount: number;
   /** Checkpoint, metadata and pending-write blob bytes. */
   bytes: number;
-  /** Whether the file is some conversation's home: it holds a conversation record. */
+  /** Whether the file holds a conversation record, which a removal must keep. */
   hasRecords: boolean;
   /** The `ts` of the newest checkpoint, when asked for and readable. */
   newestTs?: string;
@@ -432,9 +436,10 @@ export function findWriteOnlyThreads(
 }
 
 /**
- * Remove every checkpoint and pending write of the named threads, and report what went. A thread
- * file that holds no conversation record is deleted; a home file is stripped of its checkpoint
- * state inside one transaction (both tables or neither), then vacuumed. See the module note.
+ * Remove every checkpoint and pending write of the named threads, and report what went. Each
+ * thread's file is deleted whole; a file that also holds a conversation record is stripped of its
+ * checkpoint state inside one transaction (both tables or neither) and vacuumed instead. See the
+ * module note.
  *
  * `beforeRemove` is called with each thread id before its file is touched, so a caller holding a
  * connection to it can close it first: on win32 an open file cannot be deleted. A file that still
@@ -610,7 +615,7 @@ export function selectPrunableConversations(
  * The readout: what the store's checkpoint state holds, and what of it is unaddressable.
  *
  * `fileBytes` and `checkpointBytes` are reported separately on purpose — the store also holds the
- * session transcripts (twice: in the index, and in each home file) and the search index, so one
+ * session transcripts (twice: in the index, and in each record file) and the search index, so one
  * number labelled "checkpoints" that is really the whole store would be a false statement on the
  * very screen this exists to make honest.
  */

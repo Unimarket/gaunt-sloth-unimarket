@@ -348,7 +348,7 @@ export function rebuildHistoryIndex(storePath: string): IndexRebuildSummary {
   return summary;
 }
 
-/** Give a conversation record a new id inside its home file, turns included. */
+/** Give a conversation record a new id inside its record file, turns included. */
 function renumberInFile(path: string, from: number, to: number): void {
   const db = openConnection(path);
   try {

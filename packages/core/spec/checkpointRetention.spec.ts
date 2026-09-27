@@ -180,6 +180,18 @@ describe('GS2-107 checkpoint retention', () => {
       ).run(threadId, new TextEncoder().encode('y'.repeat(bytes)));
     });
 
+  /**
+   * Put a conversation record into a THREAD's file: the mixed shape this release never writes (a
+   * conversation's record has a file of its own) but a hand-built or damaged store could hold.
+   */
+  const seedRecordInto = (threadId: string): void =>
+    withThread(threadId, (db) => {
+      db.prepare(
+        `INSERT INTO conversation_records (id, started_ts, command, thread_id)
+         VALUES (900, ?, 'chat', ?)`
+      ).run(ago(10 * DAY), threadId);
+    });
+
   /** How many rows one table holds for a thread — read off that thread's own file. */
   const rowsFor = (table: string, threadId: string): number =>
     countRows(dbPath, table, threadId) as number;
@@ -293,21 +305,44 @@ describe('GS2-107 checkpoint retention', () => {
       expect(rowsFor('checkpoint_writes', 'kept')).toBe(2);
     });
 
-    it('strips a HOME file of its checkpoint state and keeps the conversation record and turns', () => {
+    it("deletes a NAMED conversation's thread file whole, and its transcript survives in its own record file", () => {
+      // Rule 6: prune deletes whole thread files. The transcript promise holds anyway, because the
+      // conversation's record and turns were never in the thread's file.
       openStore();
-      seedThread('home', { count: 3 });
-      const id = seedConversation({ threadId: 'home', turns: 2 });
+      seedThread('named', { count: 3 });
+      const id = seedConversation({ threadId: 'named', turns: 2 });
+      const threadPath = threadFilePathOf(dbPath, 'named')!;
 
-      expect(removeThreadState(dbPath, ['home'])).toMatchObject({ threadCount: 1 });
-      expect(rowsFor('checkpoints', 'home')).toBe(0);
-      expect(rowsFor('checkpoint_writes', 'home')).toBe(0);
-      // The transcript promise: a pruned conversation is still listed, and a rebuilt index still
-      // carries it, because its record and turns stay in its home file.
-      expect(fileRows('home', 'conversation_records')).toBe(1);
-      expect(fileRows('home', 'turn_records')).toBe(2);
+      expect(removeThreadState(dbPath, ['named'])).toMatchObject({
+        threadCount: 1,
+        checkpointCount: 3,
+      });
+      expect(existsSync(threadPath)).toBe(false);
+
+      // Listed and readable now, and still there after the index is rebuilt from the files alone.
+      rmSync(indexPath(dbPath));
       const store = openHistoryStore(dbPath)!;
       expect(store.getConversation(id)).not.toBeNull();
+      expect(store.getConversationThread(id)).toHaveLength(2);
+      // …and no longer resumable: the file its link names is gone.
+      expect(store.getConversationThreadId(id)).toBeNull();
       store.close();
+    });
+
+    /**
+     * The fallback path: a file that holds a conversation record as well as checkpoints. This
+     * release never writes one (a conversation's record has its own file), but a hand-built or
+     * damaged store can hold one, and deleting it would lose the record. It is stripped instead.
+     */
+    it('strips a file that also holds a conversation record, and keeps the record', () => {
+      openStore();
+      seedThread('mixed', { count: 3 });
+      seedRecordInto('mixed');
+
+      expect(removeThreadState(dbPath, ['mixed'])).toMatchObject({ threadCount: 1 });
+      expect(rowsFor('checkpoints', 'mixed')).toBe(0);
+      expect(rowsFor('checkpoint_writes', 'mixed')).toBe(0);
+      expect(fileRows('mixed', 'conversation_records')).toBe(1);
     });
 
     /**
@@ -315,11 +350,12 @@ describe('GS2-107 checkpoint retention', () => {
      * making the SECOND one fail. A `BEFORE DELETE` trigger that raises makes the delete of
      * `checkpoint_writes` abort exactly where a disk error or a lock would, with the first delete
      * already issued. Without the transaction the checkpoints are gone and the pending writes remain.
+     * Only the strip path has two deletes; a whole-file delete has none to tear.
      */
     it('rolls the whole strip back when the second table refuses — no orphaned pending writes', () => {
       openStore();
       seedThread('both-tables', { count: 3 });
-      seedConversation({ threadId: 'both-tables' });
+      seedRecordInto('both-tables');
       withThread('both-tables', (db) =>
         db.exec(
           `CREATE TRIGGER refuse_write_deletes BEFORE DELETE ON checkpoint_writes
@@ -354,8 +390,9 @@ describe('GS2-107 checkpoint retention', () => {
       openStore();
       seedThread('first', { count: 2 });
       seedConversation({ threadId: 'first' });
+      // The one that refuses: a file on the strip path, whose strip is made to fail.
       seedThread('second', { count: 2 });
-      seedConversation({ threadId: 'second' });
+      seedRecordInto('second');
       withThread('second', (db) =>
         db.exec(
           `CREATE TRIGGER refuse_second BEFORE DELETE ON checkpoint_writes
@@ -627,8 +664,8 @@ describe('GS2-107 checkpoint retention', () => {
   });
 
   /**
-   * The disk space a removal gives back. An orphan's file is deleted, so its bytes come back
-   * outright. A home file is stripped and must be VACUUMed, because a delete alone only moves pages
+   * The disk space a removal gives back. A thread's file is deleted, so its bytes come back
+   * outright. A file on the strip path must be VACUUMed, because a delete alone only moves pages
    * onto the freelist: `page_size` is 4096 and `auto_vacuum` is 0. The fixture is sized a step above
    * the floor where a delete starts to free whole pages (measured: 4 x 4,000 bytes frees 9 pages),
    * because SQLite's packing is lumpy and a fixture hugging the floor would prove nothing on a
@@ -639,22 +676,24 @@ describe('GS2-107 checkpoint retention', () => {
     const BULK_PAYLOAD = 4_000;
     const BULK_BYTES = BULK_CHECKPOINTS * BULK_PAYLOAD;
 
-    it('an orphan thread gives back its whole file', () => {
+    it('a removed thread gives back its whole file, named or not', () => {
       openStore();
-      seedThread('bulk', { count: BULK_CHECKPOINTS, payload: BULK_PAYLOAD });
-      const path = threadFilePathOf(dbPath, 'bulk')!;
-      expect(statSync(path).size).toBeGreaterThanOrEqual(BULK_BYTES);
-      removeThreadState(dbPath, ['bulk']);
-      expect(existsSync(path)).toBe(false);
+      seedThread('orphan-bulk', { count: BULK_CHECKPOINTS, payload: BULK_PAYLOAD });
+      seedThread('named-bulk', { count: BULK_CHECKPOINTS, payload: BULK_PAYLOAD });
+      seedConversation({ threadId: 'named-bulk' });
+      const paths = ['orphan-bulk', 'named-bulk'].map((t) => threadFilePathOf(dbPath, t)!);
+      for (const path of paths) expect(statSync(path).size).toBeGreaterThanOrEqual(BULK_BYTES);
+      removeThreadState(dbPath, ['orphan-bulk', 'named-bulk']);
+      for (const path of paths) expect(existsSync(path)).toBe(false);
     });
 
-    it('a stripped home file shrinks, and the CONTROL shows a delete alone does not', () => {
+    it('a stripped file shrinks, and the CONTROL shows a delete alone does not', () => {
       openStore();
-      // Two identical home files: one stripped by hand without a VACUUM (the control), one through
-      // the product's removal.
+      // Two identical files on the strip path: one stripped by hand without a VACUUM (the
+      // control), one through the product's removal.
       for (const thread of ['control', 'pruned']) {
         seedThread(thread, { count: BULK_CHECKPOINTS, payload: BULK_PAYLOAD });
-        seedConversation({ threadId: thread });
+        seedRecordInto(thread);
       }
       const controlPath = threadFilePathOf(dbPath, 'control')!;
       const prunedPath = threadFilePathOf(dbPath, 'pruned')!;

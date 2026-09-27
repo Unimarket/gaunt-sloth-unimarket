@@ -8,13 +8,18 @@
  *
  * ```
  * <store>/index.db             conversations, sessions, sessions_fts: small, searchable, a cache
- * <store>/threads/<name>.db    ONE LangGraph thread: its checkpoints and pending writes, plus the
- *                              durable record of every conversation whose home it is
+ * <store>/threads/<name>.db    ONE LangGraph thread: its checkpoints and pending writes
+ * <store>/threads/<name>.db    or ONE conversation's record file: its row and its turns
  * ```
  *
  * `<store>` is a directory. `threads/` is flat (Andrew, 2026-09-28): no grouping by date or
- * prefix. A thread file's name is derived from its thread id by {@link threadFileName}, and the real
- * id is stored inside the file, so the name never has to be decoded to be trusted.
+ * prefix. A file's name is derived from its id by {@link threadFileName}, and the real id is stored
+ * inside the file, so the name never has to be decoded to be trusted.
+ *
+ * Both kinds of file have the same schema and are opened the same way; what differs is what is
+ * written to them. A conversation's record file is keyed by an id of its own, never by a thread it
+ * names, so checkpoint state and the durable transcript are never in the same file. That is what
+ * lets a prune delete a thread's file whole and still keep the transcript.
  *
  * ## What `history.dbPath` means (a build decision, not ruled; recorded so it can be overruled)
  *
@@ -39,28 +44,33 @@
  *
  * ## The index is a cache; the thread files are the record
  *
- * - **Every conversation has a home thread file** (`conversations.home_thread`): the thread it was
- *   opened on, or a fresh id when it was opened without one. The home file carries the
- *   conversation's row and every turn recorded under it (`conversation_records`, `turn_records`).
- * - **Thread file first, then the index row, in one commit.** A turn is written through the index
- *   connection with the home file ATTACHed, inside one transaction, so SQLite's multi-file commit
- *   (rollback journal, never WAL) lands both or neither. The two cannot drift.
- * - **The index rebuilds from the thread files alone** (`rebuildHistoryIndex`, and
- *   `gth history rebuild`). A missing `index.db` beside a non-empty `threads/` is rebuilt on open.
- *   Ids are kept: a conversation's integer id and its run id come back as they were.
- * - **An index row naming a missing file is dropped.** A rebuild keeps nothing a file does not
- *   carry, so a deleted thread file takes exactly its own conversations with it. Between rebuilds,
- *   a read that finds a conversation's thread file gone answers "no thread" for it, so it is listed
- *   and cannot be resumed. That is done at read time and never as a sweep: a sweep could see a live
- *   session's row in the moment before its file exists.
- * - **A file with no index row is recoverable** by a rebuild, or, when it holds no conversation
- *   record at all, an orphan: a thread no conversation names, which retention reclaims.
+ * - **Every conversation has a record file** (`conversations.home_thread` names it), minted with a
+ *   fresh id when the conversation is opened. It carries the conversation's row and every turn
+ *   recorded under it (`conversation_records`, `turn_records`), and nothing else.
+ * - **File first, then the index row, in one commit.** A turn is written through the index
+ *   connection with the record file ATTACHed, inside one transaction, so SQLite's multi-file commit
+ *   (rollback journal, never WAL) lands both or neither. The two cannot drift. Checkpoints are
+ *   written by the saver to the thread's own file and have no index row at all.
+ * - **The index rebuilds from the files alone** (`rebuildHistoryIndex`, and `gth history rebuild`).
+ *   A missing `index.db` beside a non-empty `threads/` is rebuilt on open. Ids are kept: a
+ *   conversation's integer id and its run id come back as they were.
+ * - **An index row naming a missing file is dropped.** Two cases, one per kind of file:
+ *   - a conversation whose **thread file** is gone is answered as having no thread by every read,
+ *     so it is listed and cannot be resumed, exactly as when its link was cut. That is done at read
+ *     time and never as a sweep: a sweep could see a live session's row in the moment before its
+ *     thread's first checkpoint creates the file;
+ *   - a conversation whose **record file** is gone is dropped by the next rebuild, which keeps
+ *     nothing a file does not carry.
+ *
+ *   Either way a deleted file loses only what it held.
+ * - **A file with no index row is recoverable** by a rebuild when it is a record file, and an
+ *   orphan when it is a thread file no conversation names, which retention reclaims.
  * - **A cut link is written to both.** When a checkpoint write fails, `clearConversationThread`
- *   clears the link in the index and in the home file's record, so a rebuild cannot make a
- *   truncated conversation resumable again.
+ *   clears the link in the index and in the record file, so a rebuild cannot make a truncated
+ *   conversation resumable again.
  *
  * Search stays in the index: each turn's prompt and response are written there as well as to the
- * home file. The text is small; the gigabytes are checkpoint state.
+ * record file. The text is small; the gigabytes are checkpoint state.
  *
  * ## Migration
  *
@@ -73,15 +83,14 @@
  *
  * ## Retention, as file operations
  *
- * - `gth history prune` removes the checkpoint state of the conversations it selects. A thread file
- *   that holds no conversation record is deleted whole. A home file keeps its conversation records
- *   and loses its checkpoints and pending writes, then is vacuumed, because the prune help and the
- *   docs promise that a pruned conversation keeps its transcript and the transcript's durable copy
- *   is in that file. (The node's rule 6 says prune deletes whole thread files; that and the
- *   transcript promise cannot both hold for a home file, so the promise wins and the conflict is
- *   reported for Andrew.)
- * - The automatic pass reclaims threads no conversation names, past the grace window, the same
- *   way: an orphan file is deleted, a home file is stripped.
+ * - `gth history prune` deletes the thread files of the conversations it selects, whole. Their
+ *   transcripts stay, because they are in the conversations' record files, which prune never
+ *   touches.
+ * - The automatic pass deletes the files of threads no conversation names, past the grace window.
+ * - A file that cannot be deleted (on Windows, one another process holds open) is emptied of its
+ *   checkpoints and pending writes in one transaction and vacuumed instead, so its bytes come back
+ *   either way. The same fallback covers a file holding both checkpoints and a conversation record,
+ *   which this release never writes but a hand-built or damaged store could hold.
  * - **Both liveness guards survive.** An idle SQLite connection holds no lock, and POSIX lets a
  *   file be deleted while open, so "a live thread's file is open and locked" cannot be asked of the
  *   filesystem. The in-process write set (the saver's threads) and the cross-process grace window
