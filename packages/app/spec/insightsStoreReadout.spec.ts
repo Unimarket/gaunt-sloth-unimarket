@@ -104,7 +104,8 @@ describe('gth insights — the conversation-store readout (GS2-107)', () => {
     expect(said).toContain('no conversation (not resumable)');
     // The database file is bigger than the checkpoint blobs it holds — two numbers, not one.
     expect(said).toContain(`(${dbPath})`);
-    expect(statSync(dbPath).size).toBeGreaterThan(0);
+    // The store is a directory now, and a directory's own size is 0 on win32; its index file is not.
+    expect(statSync(resolve(dbPath, 'index.db')).size).toBeGreaterThan(0);
   });
 
   it('MUTATION CONTROL: the numbers move with the store rather than being printed from a constant', async () => {
