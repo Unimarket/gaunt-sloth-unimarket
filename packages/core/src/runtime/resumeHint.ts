@@ -126,7 +126,7 @@ export function announceResumeHint(
   const rung = resolveResumeHintRung(config);
   if (rung === 'none' || (command !== 'ask' && command !== 'exec')) return;
   const debug = rung === 'debug';
-  const where = () => `History file: ${resolveHistoryDbPath(config.history?.dbPath)}`;
+  const where = () => `History store: ${resolveHistoryDbPath(config.history?.dbPath)}`;
 
   if (!resumability.resumable) {
     if (!debug) return;
@@ -145,7 +145,7 @@ export function announceResumeHint(
   if (recorded!.runId === null) {
     lines.push(
       'This conversation predates run ids, so it is named by its number, which is only valid in ' +
-        'this history file.'
+        'this history store.'
     );
   }
   displayNotice(title, lines);

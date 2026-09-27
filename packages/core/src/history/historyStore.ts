@@ -6,18 +6,19 @@
  * per-run `.md` logs, so `gth history search` / `gth insights` can look back over past sessions.
  * It is a **side-benefit, never a critical path**:
  *
- * - **Local only.** Nothing leaves the machine. The DB lives under the user's global `~/.gsloth`
+ * - **Local only.** Nothing leaves the machine. The store lives under the user's global `~/.gsloth`
  *   dir (cross-project history), overridable via `history.dbPath`.
  * - **On unless turned off.** The recorder writes unless `history.enabled` is `false` (see
  *   `isHistoryEnabled` in `historyEnabled.ts`, the one switch it shares with the durable
  *   checkpointer).
- * - **Fail-soft.** {@link openHistoryStore} returns `null` if the DB can't be opened, and every
+ * - **Fail-soft.** {@link openHistoryStore} returns `null` if the store can't be opened, and every
  *   {@link HistoryStore} method catches its own errors and returns a safe default. A malformed or
- *   locked DB therefore can never abort or alter a run — it just means no history for that run.
+ *   locked store therefore can never abort or alter a run — it just means no history for that run.
  *
- * The same file also holds the durable LangGraph checkpoints a resume reads back (`GthSqliteSaver`
- * in `checkpointSaver.ts`), which owns its own tables here. One file, one opt-out, one thing to
- * delete.
+ * GS2-121 — the store is a directory: this class reads and writes its `index.db`, and writes each
+ * conversation's durable record into the conversation's home thread file in the same commit. The
+ * layout, what `history.dbPath` means, and why the index is only a cache are set out in
+ * `historyLayout.ts`.
  *
  * Uses the built-in `node:sqlite` (Node ≥ 24) — zero native dependency, no build step — and its
  * bundled **FTS5** extension for full-text search (verified available at build time via an
@@ -26,18 +27,27 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { getGlobalGslothDir, ensureGlobalGslothDir } from '#src/utils/globalConfigUtils.js';
 import type { ConversationRef } from '#src/history/conversationRef.js';
+import { threadFilePath } from '#src/history/historyLayout.js';
+import {
+  ensureThreadFile,
+  openIndexDb,
+  prepareHistoryStore,
+  rebuildHistoryIndex,
+  type IndexRebuildSummary,
+} from '#src/history/historyFiles.js';
+import { INDEX_SCHEMA_STEPS, closeQuietly, migrateFile } from '#src/history/historyMigrations.js';
 
-/** Filename of the global history DB inside `~/.gsloth`. */
-export const HISTORY_DB_FILENAME = 'history.db';
-
-/**
- * How long a statement waits for another connection's lock before giving up. Kept in step with the
- * checkpoint saver's own timeout — the two connections share this file.
- */
-const BUSY_TIMEOUT_MS = 5000;
+export {
+  HISTORY_DB_FILENAME,
+  HISTORY_INDEX_FILENAME,
+  HISTORY_THREADS_DIRNAME,
+  historyStorePaths,
+  resolveHistoryDbPath,
+  threadFilePath,
+  type HistoryStorePaths,
+} from '#src/history/historyLayout.js';
+export type { IndexRebuildSummary } from '#src/history/historyFiles.js';
 
 /** A single persisted session record (all analytics fields optional; populated when available). */
 export interface SessionRecord {
@@ -248,219 +258,141 @@ export function toFtsMatchQuery(query: string): string {
 export class HistoryStore {
   private db: DatabaseSync;
 
-  private constructor(db: DatabaseSync) {
+  /**
+   * The store directory, whose thread files hold each conversation's durable record; `null` for an
+   * in-memory store (`:memory:`), which is an index alone.
+   */
+  private storePath: string | null;
+
+  private constructor(db: DatabaseSync, storePath: string | null) {
     this.db = db;
+    this.storePath = storePath;
   }
 
   /**
-   * Open (and lazily initialise) the store at `dbPath`. Returns `null` on any failure — a missing
-   * file when `create` is false, an unopenable/locked/corrupt DB, or a schema-init error — so the
-   * caller can simply skip history without a try/catch.
+   * Open the store at `storePath`: split a single-file store from an earlier release, open and
+   * migrate its index, and rebuild the index from the thread files when it is missing. Returns
+   * `null` on any failure — nothing there when `create` is false, a split another process is
+   * running, an unopenable/locked/corrupt index — so the caller can simply skip history without a
+   * try/catch. `:memory:` opens an index with no thread files, for specs.
    */
-  static open(dbPath: string, options: OpenHistoryStoreOptions = {}): HistoryStore | null {
+  static open(storePath: string, options: OpenHistoryStoreOptions = {}): HistoryStore | null {
     const create = options.create ?? false;
-    if (!create && dbPath !== ':memory:' && !existsSync(dbPath)) {
-      return null;
-    }
-    let db: DatabaseSync | undefined;
+    let db: DatabaseSync | null = null;
     try {
-      db = new DatabaseSync(dbPath);
-      // GS2-20: the durable checkpointer holds a long-lived connection to this same file while the
-      // recorder opens it for a moment at the end of every turn, so two writers on one file is now
-      // the ordinary case. Without a busy timeout a routine overlap surfaces as a `SQLITE_BUSY`,
-      // which every method here swallows — i.e. as a silently dropped turn.
-      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-      const store = new HistoryStore(db);
-      store.initSchema();
-      return store;
-    } catch {
-      // GS2-42: initSchema() (or the DatabaseSync constructor itself) can throw after the OS-level
-      // file handle is already open (e.g. a corrupt/garbage DB file — SQLite doesn't validate the
-      // file header until the first statement executes). Fail-soft-close it here before returning
-      // null, mirroring close()'s own try/catch, since on win32 an unclosed handle blocks the file
-      // from being deleted/replaced/reopened until the process exits (POSIX allows unlinking an
-      // open fd, which is why this leak was invisible there).
-      try {
-        db?.close();
-      } catch {
-        /* ignore: db may already be in a broken state */
+      if (storePath === ':memory:') {
+        db = new DatabaseSync(':memory:');
+        migrateFile(db, INDEX_SCHEMA_STEPS);
+        return new HistoryStore(db, null);
       }
+      if (prepareHistoryStore(storePath, { create }) !== 'ready') return null;
+      db = openIndexDb(storePath, { create });
+      if (!db) return null;
+      return new HistoryStore(db, storePath);
+    } catch {
+      // GS2-42: a migration can throw after the OS-level file handle is already open (e.g. a
+      // corrupt/garbage file — SQLite doesn't validate the header until the first statement
+      // executes). Close it before returning null: on win32 an unclosed handle blocks the file from
+      // being deleted/replaced/reopened until the process exits.
+      closeQuietly(db ?? undefined);
       return null;
     }
-  }
-
-  private initSchema(): void {
-    // GS2-19: the `sessions` table is turn-grained (its rows are prompt→response turns, despite the
-    // name). A `conversations` table groups the turns of one interactive session; each turn carries
-    // a `conversation_id`. `conversation_id` is a plain INTEGER join key, not an enforced FK — SQLite
-    // leaves `foreign_keys` off by default and `ALTER TABLE ADD COLUMN` can't add a REFERENCES clause,
-    // so declaring one here would only make the fresh schema drift from the migrated one. The column
-    // definition is kept byte-identical between this fresh path and {@link migrate}'s ALTER.
-    //
-    // GS2-20 adds `conversations.thread_id` on the same terms: a plain nullable TEXT column, whose
-    // definition here matches the ALTER in {@link migrate} exactly, so a DB created fresh and a DB
-    // upgraded in place have identical schemas. `conversations.grants` follows the same rule: the
-    // session-scoped approval grants a resume restores, as one opaque JSON document owned by the
-    // approvals layer (`core/approvals/conversationGrants.ts`); this store never reads inside it.
-    //
-    // GS2-106 adds `conversations.run_id` on the same terms, with its UNIQUE index created in
-    // {@link migrate} after the ALTER; the reason it is a column of its own and not `thread_id` is
-    // at that ALTER. `conversations.origin` follows on the same terms again.
-    //
-    // Both tables carry a `project` column, and both hold the PROJECT ROOT the row was written
-    // under — not the working directory the session was in. See {@link SessionRecord.project} and
-    // {@link ConversationMeta.project}; the distinction is load-bearing because a resume's
-    // workspace check reads `conversations.project` and refuses on it.
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        started_ts TEXT NOT NULL,
-        project TEXT,
-        command TEXT,
-        model TEXT,
-        thread_id TEXT,
-        grants TEXT,
-        run_id TEXT,
-        origin TEXT
-      );
-      CREATE TABLE IF NOT EXISTS sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT NOT NULL,
-        project TEXT,
-        command TEXT,
-        model TEXT,
-        prompt TEXT,
-        response TEXT,
-        tokens_input INTEGER,
-        tokens_output INTEGER,
-        cost_usd REAL,
-        tools TEXT,
-        duration_ms INTEGER,
-        conversation_id INTEGER
-      );
-      CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
-        prompt, response, command, project
-      );
-    `);
-    this.migrate();
   }
 
   /**
-   * GS2-19 — in-place, idempotent upgrade of a pre-existing GS2-7 DB (flat `sessions` rows, no
-   * grouping) to the conversation-grained model. Runs on every open (including read-only `list` /
-   * `search` opens, which open the file read-write): it adds the `conversation_id` column if an
-   * older `sessions` table lacks it, then back-fills each ungrouped turn into its own 1-turn
-   * conversation. After the first pass there are no ungrouped rows, so it is a cheap no-op.
+   * Run `write` with the home thread file of a conversation ATTACHed as `home`, so the writes to it
+   * and to the index commit together. `write` is told whether `home` is there: an in-memory store,
+   * or a conversation row with no home, writes the index alone.
    *
-   * Fully fail-soft: a migration hiccup is swallowed here rather than nulling the store, so reads
-   * still work against whatever is already there and new turns just fall back to fresh 1-turn
-   * conversations. Never throws.
+   * The file is created and migrated first, by its own short-lived connection, because an ATTACHed
+   * file is not migrated by the connection that attaches it.
    */
-  private migrate(): void {
+  private withHome<T>(home: string | null, write: (attached: boolean) => T): T {
+    if (this.storePath === null || home === null) return write(false);
+    const path = ensureThreadFile(this.storePath, home);
+    this.db.prepare(`ATTACH DATABASE ? AS home`).run(path);
     try {
-      const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Record<
-        string,
-        unknown
-      >[];
-      const hasConversationId = cols.some((c) => c.name === 'conversation_id');
-      if (!hasConversationId) {
-        this.db.exec(`ALTER TABLE sessions ADD COLUMN conversation_id INTEGER`);
-      }
-      // GS2-20 — the conversation-to-thread link, added the same way for the same reason: a DB
-      // written before this column existed must keep working, and its rows simply have no thread
-      // (they are listable and not resumable, which is the truth about them).
-      const conversationCols = this.db.prepare(`PRAGMA table_info(conversations)`).all() as Record<
-        string,
-        unknown
-      >[];
-      if (!conversationCols.some((c) => c.name === 'thread_id')) {
-        this.db.exec(`ALTER TABLE conversations ADD COLUMN thread_id TEXT`);
-      }
-      // GS2-20 — the grants a resumed conversation gets back. Nullable for the same reason: a row
-      // written before the column existed simply has no grants to restore, which is the truth.
-      if (!conversationCols.some((c) => c.name === 'grants')) {
-        this.db.exec(`ALTER TABLE conversations ADD COLUMN grants TEXT`);
-      }
-      // GS2-107 — the index the retention predicate needs, created here and not in `initSchema`
-      // because the column it covers is added by the ALTER just above: a database written before
-      // GS2-20 has no `conversations.thread_id` until this method has run, and indexing a column
-      // that does not exist yet fails the whole migration.
-      //
-      // `conversations.id` is an INTEGER PRIMARY KEY and therefore a rowid alias, which leaves
-      // `thread_id` unindexed. Retention asks "does any conversation name this thread?" once per
-      // thread in the store, at every session exit, so without this the pass is quadratic —
-      // measured at 3.18s for 6,000 threads against 13ms with it. `IF NOT EXISTS`, so it is a
-      // no-op on every open after the first.
-      this.db.exec(
-        `CREATE INDEX IF NOT EXISTS idx_conversations_thread_id ON conversations(thread_id)`
-      );
-      // GS2-106 — the conversation's STABLE id: a UUID minted when the row is created, which a
-      // continue hint prints and a person may paste days later. `conversations.id` cannot be that
-      // id, because it is an autoincrement integer and a database that was deleted and recreated
-      // hands the same integers out again — so a stale integer silently names a DIFFERENT
-      // conversation. A run id from another database names nothing here, and is refused as unknown.
-      //
-      // **Not `thread_id`, and the two must never be collapsed.** `thread_id` is a link that is
-      // allowed to break: `clearConversationThread` sets it to NULL on a live row when a checkpoint
-      // write fails, which is how a truncated conversation is made unresumable. A pasted id built
-      // on it would then stop resolving at all while `gth history show` still has the transcript,
-      // and the person would be told the conversation does not exist. The run id names the
-      // conversation; the thread id names its state; only the second may be cut.
-      //
-      // Rows that exist before this column is added keep `run_id = NULL` — no backfill — and stay
-      // addressable by their integer. UNIQUE permits any number of NULLs, which is what they need.
-      // The index follows the ALTER for the reason the GS2-107 index above gives.
-      if (!conversationCols.some((c) => c.name === 'run_id')) {
-        this.db.exec(`ALTER TABLE conversations ADD COLUMN run_id TEXT`);
-      }
-      this.db.exec(
-        `CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_run_id ON conversations(run_id)`
-      );
-      // GS2-106 — the surface that started a fan-out run (`batch`, `eval`, `gth-batch`,
-      // `workflow`), NULL for a direct `ask`/`exec`/`chat`/`code` run. `command` keeps the mode the
-      // run actually used, which is what `gth insights` groups by; this column is what tells one
-      // cell of a batch apart from a real `gth exec`, so every resume surface can refuse the cell.
-      // Nullable, with no backfill: a row written before it existed has no origin on record.
-      if (!conversationCols.some((c) => c.name === 'origin')) {
-        this.db.exec(`ALTER TABLE conversations ADD COLUMN origin TEXT`);
-      }
-      const orphans = this.db
-        .prepare(
-          `SELECT id, ts, project, command, model
-             FROM sessions
-            WHERE conversation_id IS NULL
-            ORDER BY id`
-        )
-        .all() as Record<string, unknown>[];
-      if (orphans.length === 0) return;
-      this.db.exec('BEGIN');
+      return write(true);
+    } finally {
       try {
-        // GS2-106 — these conversation rows are CREATED here, so they are minted a run id like
-        // every other new row. That is not a backfill: the turns existed, their conversations did
-        // not.
-        const insertConversation = this.db.prepare(
-          `INSERT INTO conversations (started_ts, project, command, model, run_id)
-           VALUES (?, ?, ?, ?, ?)`
-        );
-        const stampTurn = this.db.prepare(`UPDATE sessions SET conversation_id = ? WHERE id = ?`);
-        for (const row of orphans) {
-          const info = insertConversation.run(
-            row.ts != null ? String(row.ts) : new Date().toISOString(),
-            row.project != null ? String(row.project) : null,
-            row.command != null ? String(row.command) : null,
-            row.model != null ? String(row.model) : null,
-            randomUUID()
-          );
-          stampTurn.run(Number(info.lastInsertRowid), Number(row.id));
-        }
-        this.db.exec('COMMIT');
-      } catch (e) {
-        this.db.exec('ROLLBACK');
-        throw e;
+        this.db.exec('DETACH DATABASE home');
+      } catch {
+        /* a failed write may have left the connection unable to detach; closing it releases it */
       }
-    } catch {
-      /* fail-soft: a migration failure must not break opening the store or a run */
     }
+  }
+
+  /** The home thread of one conversation, or `null` when it has none or does not exist. */
+  private homeOf(conversationId: number): string | null {
+    const row = this.db
+      .prepare(`SELECT home_thread FROM conversations WHERE id = ?`)
+      .get(conversationId) as Record<string, unknown> | undefined;
+    return row?.home_thread != null && String(row.home_thread).length > 0
+      ? String(row.home_thread)
+      : null;
+  }
+
+  /**
+   * Whether the file of `threadId` exists — the read-time half of "an index row naming a missing
+   * file is dropped": a conversation whose thread file is gone is listed and cannot be resumed.
+   * Always true for an in-memory store, which has no files to lose.
+   */
+  private threadFileExists(threadId: string): boolean {
+    return this.storePath === null || existsSync(threadFilePath(this.storePath, threadId));
+  }
+
+  /** A stored `thread_id` as the link a reader may follow, or `undefined` when there is none. */
+  private liveThread(value: unknown): string | undefined {
+    if (value == null) return undefined;
+    const threadId = String(value);
+    if (threadId.length === 0) return undefined;
+    return this.threadFileExists(threadId) ? threadId : undefined;
+  }
+
+  /**
+   * Write one conversation row into the index and its home file, in the transaction the caller
+   * holds. Returns the new id.
+   */
+  private insertConversation(
+    attached: boolean,
+    row: {
+      ts: string;
+      project: string | null;
+      command: string | null;
+      model: string | null;
+      threadId: string | null;
+      runId: string;
+      origin: string | null;
+      home: string | null;
+    }
+  ): number {
+    const info = this.db
+      .prepare(
+        `INSERT INTO conversations
+           (started_ts, project, command, model, thread_id, run_id, origin, home_thread)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        row.ts,
+        row.project,
+        row.command,
+        row.model,
+        row.threadId,
+        row.runId,
+        row.origin,
+        row.home
+      );
+    const id = Number(info.lastInsertRowid);
+    if (attached) {
+      this.db
+        .prepare(
+          `INSERT INTO home.conversation_records
+             (id, started_ts, project, command, model, thread_id, run_id, origin)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(id, row.ts, row.project, row.command, row.model, row.threadId, row.runId, row.origin);
+    }
+    return id;
   }
 
   /**
@@ -471,23 +403,42 @@ export class HistoryStore {
    */
   openConversation(meta: ConversationMeta = {}): number | null {
     try {
-      const ts = meta.ts ?? new Date().toISOString();
-      const info = this.db
-        .prepare(
-          `INSERT INTO conversations (started_ts, project, command, model, thread_id, run_id)
-           VALUES (?, ?, ?, ?, ?, ?)`
+      // GS2-121 — the conversation's home is the thread it is opened on, so its record lives beside
+      // that thread's checkpoints; one opened without a thread gets a file of its own.
+      const home = meta.threadId ?? randomUUID();
+      return this.withHome(home, (attached) =>
+        this.inTransaction(() =>
+          this.insertConversation(attached, {
+            ts: meta.ts ?? new Date().toISOString(),
+            project: meta.project ?? null,
+            command: meta.command ?? null,
+            model: meta.model ?? null,
+            threadId: meta.threadId ?? null,
+            runId: randomUUID(),
+            origin: null,
+            home,
+          })
         )
-        .run(
-          ts,
-          meta.project ?? null,
-          meta.command ?? null,
-          meta.model ?? null,
-          meta.threadId ?? null,
-          randomUUID()
-        );
-      return Number(info.lastInsertRowid);
+      );
     } catch {
       return null;
+    }
+  }
+
+  /** Run `work` in one transaction, rolled back on any error, which is rethrown. */
+  private inTransaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* the failed statement may already have ended the transaction */
+      }
+      throw error;
     }
   }
 
@@ -528,9 +479,8 @@ export class HistoryStore {
       const row = this.db
         .prepare(`SELECT thread_id FROM conversations WHERE id = ?`)
         .get(conversationId) as Record<string, unknown> | undefined;
-      if (!row || row.thread_id == null) return null;
-      const threadId = String(row.thread_id);
-      return threadId.length > 0 ? threadId : null;
+      // GS2-121 — a thread whose file is gone is no thread: the link is dropped at read time.
+      return this.liveThread(row?.thread_id) ?? null;
     } catch {
       return null;
     }
@@ -556,6 +506,28 @@ export class HistoryStore {
    * one into a session that is already degraded.
    */
   clearConversationThread(conversationId: number): void {
+    // GS2-121 — cut in the home file's record too, or a rebuild of the index would restore the link
+    // and make the truncated conversation resumable again. The write that failed was very likely
+    // to this same disk, though, so when the two cannot be written together the index alone is
+    // cut: that is the half every resume reads. The residual is stated at `historyLayout.ts`.
+    try {
+      const home = this.homeOf(conversationId);
+      this.withHome(home, (attached) =>
+        this.inTransaction(() => {
+          this.db
+            .prepare(`UPDATE conversations SET thread_id = NULL WHERE id = ?`)
+            .run(conversationId);
+          if (attached) {
+            this.db
+              .prepare(`UPDATE home.conversation_records SET thread_id = NULL WHERE id = ?`)
+              .run(conversationId);
+          }
+        })
+      );
+      return;
+    } catch {
+      /* fall through to the index alone */
+    }
     try {
       this.db.prepare(`UPDATE conversations SET thread_id = NULL WHERE id = ?`).run(conversationId);
     } catch {
@@ -602,8 +574,7 @@ export class HistoryStore {
         lastTs: r.last_ts != null ? String(r.last_ts) : undefined,
         lastPrompt: last?.prompt != null ? String(last.prompt) : undefined,
         lastResponse: last?.response != null ? String(last.response) : undefined,
-        threadId:
-          r.thread_id != null && String(r.thread_id).length > 0 ? String(r.thread_id) : undefined,
+        threadId: this.liveThread(r.thread_id),
         runId: r.run_id != null ? String(r.run_id) : undefined,
         origin: r.origin != null ? String(r.origin) : undefined,
       };
@@ -635,10 +606,19 @@ export class HistoryStore {
    */
   setConversationGrants(conversationId: number, grantsJson: string | null): boolean {
     try {
-      const info = this.db
-        .prepare(`UPDATE conversations SET grants = ? WHERE id = ?`)
-        .run(grantsJson, conversationId);
-      return Number(info.changes) > 0;
+      return this.withHome(this.homeOf(conversationId), (attached) =>
+        this.inTransaction(() => {
+          const info = this.db
+            .prepare(`UPDATE conversations SET grants = ? WHERE id = ?`)
+            .run(grantsJson, conversationId);
+          if (attached) {
+            this.db
+              .prepare(`UPDATE home.conversation_records SET grants = ? WHERE id = ?`)
+              .run(grantsJson, conversationId);
+          }
+          return Number(info.changes) > 0;
+        })
+      );
     } catch {
       return false;
     }
@@ -666,74 +646,82 @@ export class HistoryStore {
     try {
       const ts = rec.ts ?? new Date().toISOString();
       const tools = rec.tools && rec.tools.length > 0 ? JSON.stringify(rec.tools) : null;
-      this.db.exec('BEGIN');
-      try {
-        // GS2-19: every turn belongs to a conversation. When the caller opened one up-front
-        // (interactive sessions), stamp it; otherwise open a fresh 1-turn conversation for this row
-        // (single-shot runs / bare record() calls) so the turn is never left ungrouped.
-        //
-        // GS2-106: a fresh conversation is minted its run id here, and carries the single-shot
-        // run's thread when one was checkpointed — written in the same transaction as the turn, so
-        // there is no moment at which the row exists without its link.
-        let conversationId = rec.conversationId ?? null;
-        let runId: string | null;
-        if (conversationId == null) {
-          runId = randomUUID();
-          const cinfo = this.db
-            .prepare(
-              `INSERT INTO conversations
-                 (started_ts, project, command, model, thread_id, run_id, origin)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`
-            )
-            .run(
+      // GS2-121 — the turn's durable copy goes to its conversation's home thread file, in the
+      // same commit as the index row. A fresh conversation's home is the run's thread when it was
+      // checkpointed, and a file of its own when it was not.
+      const existingId = rec.conversationId ?? null;
+      const home = existingId == null ? (rec.threadId ?? randomUUID()) : this.homeOf(existingId);
+      return this.withHome(home, (attached) =>
+        this.inTransaction((): RecordedTurn => {
+          // GS2-19: every turn belongs to a conversation. When the caller opened one up-front
+          // (interactive sessions), stamp it; otherwise open a fresh 1-turn conversation for this
+          // row (single-shot runs / bare record() calls) so the turn is never left ungrouped.
+          //
+          // GS2-106: a fresh conversation is minted its run id here, and carries the single-shot
+          // run's thread when one was checkpointed — written in the same transaction as the turn,
+          // so there is no moment at which the row exists without its link.
+          let conversationId = existingId;
+          let runId: string | null;
+          if (conversationId == null) {
+            runId = randomUUID();
+            conversationId = this.insertConversation(attached, {
               ts,
-              rec.project ?? null,
-              rec.command ?? null,
-              rec.model ?? null,
-              rec.threadId ?? null,
+              project: rec.project ?? null,
+              command: rec.command ?? null,
+              model: rec.model ?? null,
+              threadId: rec.threadId ?? null,
               runId,
-              rec.origin ?? null
-            );
-          conversationId = Number(cinfo.lastInsertRowid);
-        } else {
-          const existing = this.db
-            .prepare(`SELECT run_id FROM conversations WHERE id = ?`)
-            .get(conversationId) as Record<string, unknown> | undefined;
-          runId = existing?.run_id != null ? String(existing.run_id) : null;
-        }
-        const insert = this.db.prepare(
-          `INSERT INTO sessions
-             (ts, project, command, model, prompt, response,
-              tokens_input, tokens_output, cost_usd, tools, duration_ms, conversation_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        );
-        const info = insert.run(
-          ts,
-          rec.project ?? null,
-          rec.command ?? null,
-          rec.model ?? null,
-          rec.prompt ?? null,
-          rec.response ?? null,
-          rec.tokensInput ?? null,
-          rec.tokensOutput ?? null,
-          rec.costUsd ?? null,
-          tools,
-          rec.durationMs ?? null,
-          conversationId
-        );
-        const id = Number(info.lastInsertRowid);
-        this.db
-          .prepare(
-            `INSERT INTO sessions_fts (rowid, prompt, response, command, project)
-             VALUES (?, ?, ?, ?, ?)`
-          )
-          .run(id, rec.prompt ?? '', rec.response ?? '', rec.command ?? '', rec.project ?? '');
-        this.db.exec('COMMIT');
-        return { sessionId: id, conversationId, runId };
-      } catch (e) {
-        this.db.exec('ROLLBACK');
-        throw e;
-      }
+              origin: rec.origin ?? null,
+              home,
+            });
+          } else {
+            const existing = this.db
+              .prepare(`SELECT run_id FROM conversations WHERE id = ?`)
+              .get(conversationId) as Record<string, unknown> | undefined;
+            runId = existing?.run_id != null ? String(existing.run_id) : null;
+          }
+          const values = [
+            ts,
+            rec.project ?? null,
+            rec.command ?? null,
+            rec.model ?? null,
+            rec.prompt ?? null,
+            rec.response ?? null,
+            rec.tokensInput ?? null,
+            rec.tokensOutput ?? null,
+            rec.costUsd ?? null,
+            tools,
+            rec.durationMs ?? null,
+            conversationId,
+          ] as const;
+          const info = this.db
+            .prepare(
+              `INSERT INTO sessions
+                 (ts, project, command, model, prompt, response,
+                  tokens_input, tokens_output, cost_usd, tools, duration_ms, conversation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            )
+            .run(...values);
+          const id = Number(info.lastInsertRowid);
+          if (attached) {
+            this.db
+              .prepare(
+                `INSERT INTO home.turn_records
+                   (id, ts, project, command, model, prompt, response,
+                    tokens_input, tokens_output, cost_usd, tools, duration_ms, conversation_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              )
+              .run(id, ...values);
+          }
+          this.db
+            .prepare(
+              `INSERT INTO sessions_fts (rowid, prompt, response, command, project)
+               VALUES (?, ?, ?, ?, ?)`
+            )
+            .run(id, rec.prompt ?? '', rec.response ?? '', rec.command ?? '', rec.project ?? '');
+          return { sessionId: id, conversationId, runId };
+        })
+      );
     } catch {
       return null;
     }
@@ -840,7 +828,7 @@ export class HistoryStore {
           lastTs: r.last_ts != null ? String(r.last_ts) : undefined,
           lastPrompt: last?.prompt != null ? String(last.prompt) : undefined,
           lastResponse: last?.response != null ? String(last.response) : undefined,
-          threadId: r.thread_id != null ? String(r.thread_id) : undefined,
+          threadId: this.liveThread(r.thread_id),
           runId: r.run_id != null ? String(r.run_id) : undefined,
           origin: r.origin != null ? String(r.origin) : undefined,
         };
@@ -991,23 +979,26 @@ function rowToRecord(r: Record<string, unknown>): SessionRecord {
 }
 
 /**
- * Resolve the on-disk path of the history DB. Honors an explicit `dbPath` (from `history.dbPath`
- * or a `--db` flag); otherwise the global `~/.gsloth/history.db`. When `dbPath` is omitted and
- * `ensureDir` is true, the global dir is created so the recorder can write.
- */
-export function resolveHistoryDbPath(dbPath?: string, ensureDir = false): string {
-  if (dbPath && dbPath.trim().length > 0) return dbPath;
-  const dir = ensureDir ? ensureGlobalGslothDir() : getGlobalGslothDir();
-  return resolve(dir, HISTORY_DB_FILENAME);
-}
-
-/**
- * Fail-soft open of the history store. Returns `null` (never throws) when the DB can't be opened
- * or, for read-only callers (`create: false`, the default), when the file does not yet exist.
+ * Fail-soft open of the history store. Returns `null` (never throws) when the store can't be opened
+ * or, for read-only callers (`create: false`, the default), when nothing is there yet.
  */
 export function openHistoryStore(
   dbPath: string,
   options: OpenHistoryStoreOptions = {}
 ): HistoryStore | null {
   return HistoryStore.open(dbPath, options);
+}
+
+/**
+ * GS2-121 — rebuild the index of the store at `storePath` from its thread files alone, which is
+ * what `gth history rebuild` runs. Splits a single-file store first, like any open. `null` when
+ * there is no store there or it could not be rebuilt; never throws.
+ */
+export function rebuildHistoryIndexSafe(storePath: string): IndexRebuildSummary | null {
+  try {
+    if (prepareHistoryStore(storePath, { create: false }) !== 'ready') return null;
+    return rebuildHistoryIndex(storePath);
+  } catch {
+    return null;
+  }
 }

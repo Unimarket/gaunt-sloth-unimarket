@@ -963,6 +963,57 @@ export async function loadConfiguredConsoleLevel(
 }
 
 /**
+ * GS2-119 — the configured `history.dbPath`, read without building a model, or `undefined` when no
+ * layer sets a usable one.
+ *
+ * The read-only history commands (`gth history list` / `search` / `show` / `prune` / `rebuild` and
+ * `gth insights`) must open the store the recorder writes, so they resolve `--db`, then this, then
+ * the default. They cannot use {@link initConfig}: it builds the model, and a machine with no API key
+ * in its environment, or with no config at all, must still be able to list what it recorded.
+ *
+ * Layering matches a run for this one key: the project layer (through its `extends` chain) wins
+ * over the global one, and a layer that does not set it defers. Quiet and fail-soft like
+ * {@link loadConfiguredConsoleLevel}: a config it cannot read is a config with no `dbPath`, and the
+ * command falls back to the default store — the same one a run with that config would fail to load
+ * before reaching its recorder.
+ */
+export async function loadConfiguredHistoryDbPath(
+  commandLineConfigOverrides: CommandLineConfigOverrides
+): Promise<string | undefined> {
+  const pick = (raw: Record<string, unknown>): string | undefined => {
+    const history = raw.history as Record<string, unknown> | undefined;
+    const dbPath = history?.dbPath;
+    return typeof dbPath === 'string' && dbPath.trim().length > 0 ? dbPath : undefined;
+  };
+  try {
+    const discovered = findProjectConfigPath(commandLineConfigOverrides);
+    if (discovered) {
+      let raw = await readRawConfigAtPath(discovered.path);
+      if (typeof raw.extends === 'string') {
+        raw = await resolveConfigExtends(raw, commandLineConfigOverrides.identityProfile);
+      }
+      const projectDbPath = pick(raw);
+      if (projectDbPath !== undefined) return projectDbPath;
+    }
+    const globalRaw = await loadGlobalRawConfigUnvalidated(
+      globalLayerProfile(commandLineConfigOverrides)
+    );
+    if (!globalRaw) return undefined;
+    let raw = globalRaw.raw;
+    // Walked on exactly the branch a run walks it on — see {@link loadConfiguredTui}.
+    if (!discovered && typeof raw.extends === 'string') {
+      raw = await resolveConfigExtends(raw, globalLayerProfile(commandLineConfigOverrides), {
+        globalOnly: commandLineConfigOverrides.global,
+      });
+    }
+    return pick(raw);
+  } catch (e) {
+    displayDebug(e instanceof Error ? e : String(e));
+    return undefined;
+  }
+}
+
+/**
  * The PROJECT layer's raw `consoleLevel`, composed through its `extends` chain the way a run
  * composes it. Returns whatever the config carries; the caller narrows it.
  */

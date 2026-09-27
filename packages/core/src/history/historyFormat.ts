@@ -200,7 +200,7 @@ export function formatCheckpointStoreStats(stats: CheckpointStoreStats): string[
     ];
   }
   const lines: string[] = [];
-  lines.push(`Database file: ${formatBytes(stats.fileBytes)} (${stats.dbPath})`);
+  lines.push(`Store on disk: ${formatBytes(stats.fileBytes)} (${stats.dbPath})`);
   if (stats.checkpointCount > 0) {
     lines.push(
       `Checkpoints: ${stats.checkpointCount} across ${stats.threadCount} ` +
@@ -319,12 +319,10 @@ export function formatPruneResult(
       `(${formatBytes(removed.bytes)} of stored state).`,
   ];
   if (vacuumed) {
-    lines.push(
-      `Database file: ${formatBytes(fileBytesBefore)} → ${formatBytes(fileBytesAfter)} after VACUUM.`
-    );
+    lines.push(`Store on disk: ${formatBytes(fileBytesBefore)} → ${formatBytes(fileBytesAfter)}.`);
   } else {
     lines.push(
-      'The rows are gone, but the file could not be compacted (VACUUM needs the database to ' +
+      'The rows are gone, but the store could not be compacted (VACUUM needs the file to ' +
         'itself). It will be reused for new checkpoints; run the prune again with no other ' +
         'session open to shrink it.'
     );

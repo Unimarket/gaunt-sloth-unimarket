@@ -15,14 +15,18 @@
  * `better-sqlite3`, a native module with a compile step, which would put a node-gyp build in the
  * path of every install of the CLI.
  *
- * **Storage layout.** Two tables of this module's own — `checkpoints` and `checkpoint_writes` —
- * created idempotently on open, in the same file as the store's `sessions` / `conversations`.
- * One file, one opt-out, one thing to delete. The store owns its tables and this owns these; there
- * is no shared DDL, so the store's per-call open (which re-runs its own migration every time)
- * cannot race this module's long-lived connection over the same schema.
+ * **Storage layout.** GS2-121 — one file per thread: `<store>/threads/<thread>.db` holds that
+ * thread's `checkpoints` and `checkpoint_writes` (see `historyLayout.ts`). One saver serves a whole
+ * session and ROUTES every call by its `thread_id`, opening each thread's file the first time that
+ * thread is written or read and holding the connection until {@link GthSqliteSaver.close}. It cannot
+ * be bound to one file at open: the runner rotates threads on `/clear`, before every turn on the
+ * conversational surfaces, and on `/resume`, and tells nobody. A read of a thread that has no file
+ * creates none. Two sessions on different threads therefore write different files and never wait
+ * on each other's lock. A thread file that will not open for a write is a failed write, on the
+ * degrade path below.
  *
  * **Failure posture: degrade, loudly.** {@link openCheckpointSaver} is fail-soft — it returns `null`
- * rather than throwing when the DB cannot be opened or the tables cannot be created, which is what
+ * rather than throwing when the store cannot be opened or created, which is what
  * lets the session fall back to a `MemorySaver` (see `openSessionCheckpointerSafe` in
  * `sessionCheckpointer.ts`). A write that fails AFTER that — a full disk, a filesystem that went
  * read-only under a live handle — is caught here and reported through
@@ -56,11 +60,18 @@ import type { Checkpoint, CheckpointMetadata, CheckpointTuple } from '@langchain
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   collectCheckpointStoreStats,
-  deleteThreads,
   reclaimUnresumableThreads,
+  removeThreadState,
   type CheckpointStoreStats,
   type ReclaimSummary,
 } from '#src/history/checkpointRetention.js';
+import {
+  listThreadFiles,
+  openThreadDb,
+  prepareHistoryStore,
+  threadIdOfFile,
+} from '#src/history/historyFiles.js';
+import { closeQuietly } from '#src/history/historyMigrations.js';
 
 /**
  * The abstract members' own parameter types, read off the base class rather than imported.
@@ -98,13 +109,8 @@ const WRITES_IDX_MAP: Readonly<Record<string, number>> = Object.freeze({
   __resume__: -4,
 });
 
-/**
- * How long a statement waits for another connection's lock before giving up. The history recorder
- * opens the same file for a moment at the end of every turn, so two writers on one file is the
- * ordinary case here, not the exceptional one; without this a routine overlap surfaces as a
- * `SQLITE_BUSY` that aborts a turn.
- */
-const BUSY_TIMEOUT_MS = 5000;
+/** How many thread files one saver keeps open at once; the least recently used is closed first. */
+const MAX_OPEN_THREAD_FILES = 8;
 
 /** The checkpoint id named by a config, using LangGraph's own precedence (`thread_ts` is legacy). */
 function checkpointIdOf(config: RunnableConfig): string {
@@ -320,7 +326,11 @@ export interface CheckpointSaverOptions {
  * there is no way to hold one whose tables were never created.
  */
 export class GthSqliteSaver extends BaseCheckpointSaver {
-  private db: DatabaseSync;
+  /** The store directory whose `threads/` this saver writes. */
+  private readonly storePath: string;
+
+  /** GS2-121 — one connection per thread file this saver has opened, held until {@link close}. */
+  private readonly connections = new Map<string, DatabaseSync>();
 
   private onWriteFailure: (error: unknown) => void;
 
@@ -353,10 +363,44 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
    */
   private cut = false;
 
-  private constructor(db: DatabaseSync, onWriteFailure?: (error: unknown) => void) {
+  private constructor(storePath: string, onWriteFailure?: (error: unknown) => void) {
     super();
-    this.db = db;
+    this.storePath = storePath;
     this.onWriteFailure = onWriteFailure ?? (() => {});
+  }
+
+  /**
+   * The connection to `threadId`'s file: the held one, or a new one. With `create` false a thread
+   * that has no file answers `undefined` and no file is created — a read never materialises one.
+   * Throws when the file cannot be opened or migrated; a writer turns that into a failed write.
+   */
+  private connection(threadId: string, create: boolean): DatabaseSync | undefined {
+    const held = this.connections.get(threadId);
+    if (held) {
+      // Most recently used last, so the eviction below closes the one idle longest.
+      this.connections.delete(threadId);
+      this.connections.set(threadId, held);
+      return held;
+    }
+    const db = openThreadDb(this.storePath, threadId, { create });
+    if (!db) return undefined;
+    this.connections.set(threadId, db);
+    // A surface that rotates its thread before every turn opens a new file per turn; holding every
+    // one of them for the life of the process would leak a handle per turn. Closing one is always
+    // safe — the next call on that thread reopens it.
+    while (this.connections.size > MAX_OPEN_THREAD_FILES) {
+      const oldest = this.connections.keys().next().value as string;
+      this.release(oldest);
+    }
+    return db;
+  }
+
+  /** Release the held connection to one thread's file, if any. */
+  private release(threadId: string): void {
+    const held = this.connections.get(threadId);
+    if (!held) return;
+    this.connections.delete(threadId);
+    closeQuietly(held);
   }
 
   /**
@@ -376,71 +420,33 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
   }
 
   /**
-   * Open (and lazily initialise) the checkpoint tables at `dbPath`. Returns `null` on any failure —
-   * an unopenable, read-only or corrupt DB — so the caller can fall back to a `MemorySaver` without
-   * a try/catch of its own.
+   * Open the saver over the store at `storePath`, creating the store (and splitting a single-file
+   * store from an earlier release) as needed. Returns `null` on any failure — a store that cannot
+   * be created, a split another process is running, a path that is not a store — so the caller can
+   * fall back to a `MemorySaver` without a try/catch of its own. Thread files are opened lazily.
    */
-  static open(dbPath: string, options: CheckpointSaverOptions = {}): GthSqliteSaver | null {
-    let db: DatabaseSync | undefined;
+  static open(storePath: string, options: CheckpointSaverOptions = {}): GthSqliteSaver | null {
     try {
-      db = new DatabaseSync(dbPath);
-      // GS2-42's lesson applied here too: SQLite does not validate the file header until the first
-      // statement runs, so a garbage file opens cleanly and fails on the DDL below. Everything from
-      // the constructor to the last `exec` is therefore inside one try, and the handle is closed on
-      // the way out — on win32 an unclosed handle blocks the file from being replaced or reopened
-      // until the process exits.
-      db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS checkpoints (
-          thread_id TEXT NOT NULL,
-          checkpoint_ns TEXT NOT NULL DEFAULT '',
-          checkpoint_id TEXT NOT NULL,
-          parent_checkpoint_id TEXT,
-          type TEXT,
-          checkpoint BLOB,
-          metadata BLOB,
-          PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-        );
-        CREATE TABLE IF NOT EXISTS checkpoint_writes (
-          thread_id TEXT NOT NULL,
-          checkpoint_ns TEXT NOT NULL DEFAULT '',
-          checkpoint_id TEXT NOT NULL,
-          task_id TEXT NOT NULL,
-          idx INTEGER NOT NULL,
-          channel TEXT NOT NULL,
-          type TEXT,
-          value BLOB,
-          PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-        );
-      `);
-      return new GthSqliteSaver(db, options.onWriteFailure);
+      if (prepareHistoryStore(storePath, { create: true }) !== 'ready') return null;
+      return new GthSqliteSaver(storePath, options.onWriteFailure);
     } catch {
-      try {
-        db?.close();
-      } catch {
-        /* ignore: the connection may already be in a broken state */
-      }
       return null;
     }
   }
 
   /**
-   * Close the underlying connection (fail-soft), and drop the in-memory copy with it, so a closed
+   * Close every held connection (fail-soft), and drop the in-memory copy with them, so a closed
    * saver answers no read from memory that it could not answer from disk.
    */
   close(): void {
     this.mirror.clear();
-    try {
-      this.db.close();
-    } catch {
-      /* ignore */
-    }
+    for (const threadId of [...this.connections.keys()]) this.release(threadId);
   }
 
   /** The pending writes stored on disk for one checkpoint, in the order a tuple lists them. */
-  private readWriteRows(row: CheckpointRow): WriteRow[] {
+  private readWriteRows(db: DatabaseSync, row: CheckpointRow): WriteRow[] {
     return (
-      this.db
+      db
         .prepare(
           `SELECT task_id, idx, channel, type, value
              FROM checkpoint_writes
@@ -508,18 +514,22 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
       return this.toTuple(held.row, held.writes, this.tupleConfig(config, held.row));
     }
 
+    // GS2-121 — a thread with no file has no checkpoint; reading it creates nothing.
+    const db = this.connection(threadId, false);
+    if (!db) return undefined;
+
     // Checkpoint ids are uuid6, which sort lexicographically in creation order, so "the latest
     // checkpoint on this thread" is a plain DESC on the id — the same ordering MemorySaver gets
     // from sorting its keys.
     const raw = (
       checkpointId
-        ? this.db
+        ? db
             .prepare(
               `SELECT * FROM checkpoints
                 WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`
             )
             .get(threadId, checkpointNs, checkpointId)
-        : this.db
+        : db
             .prepare(
               `SELECT * FROM checkpoints
                 WHERE thread_id = ? AND checkpoint_ns = ?
@@ -530,7 +540,7 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
     ) as Record<string, unknown> | undefined;
     if (raw === undefined) return undefined;
     const row = toCheckpointRow(raw);
-    const writeRows = this.readWriteRows(row);
+    const writeRows = this.readWriteRows(db, row);
 
     // Seed memory from a LATEST read only — a resumed thread's first read, or a `/resume` peek — so
     // the next read of this thread sees what this process writes on top of it even if the disk
@@ -593,22 +603,39 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
       params.push(beforeId);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-    const rows = (
-      this.db
+    // GS2-121 — one thread's file when the config names a thread; every thread file otherwise, in
+    // thread order, which is the order one table sorted by `thread_id` gave.
+    const threadIds =
+      threadId !== undefined
+        ? [threadId]
+        : listThreadFiles(this.storePath)
+            .map(threadIdOfFile)
+            .filter((id): id is string => id !== undefined)
+            .sort();
+    // Each row's pending writes are read while its thread's connection is in hand: the saver
+    // closes idle connections as it opens others, so a connection kept for later may be gone.
+    const rows: { row: CheckpointRow; writes: WriteRow[] }[] = [];
+    for (const id of threadIds) {
+      const db = this.connection(id, false);
+      if (!db) continue;
+      for (const raw of db
         .prepare(
           `SELECT * FROM checkpoints
          ${where}
          ORDER BY thread_id ASC, checkpoint_ns ASC, checkpoint_id DESC`
         )
-        .all(...params) as Record<string, unknown>[]
-    ).map(toCheckpointRow);
+        .all(...params) as Record<string, unknown>[]) {
+        const row = toCheckpointRow(raw);
+        rows.push({ row, writes: this.readWriteRows(db, row) });
+      }
+    }
 
     // `limit` counts rows that SURVIVE `filter`, so it is applied here rather than as SQL LIMIT —
     // a metadata filter is evaluated on the deserialized object, which SQL cannot see.
     let remaining = limit;
-    for (const row of rows) {
+    for (const { row, writes } of rows) {
       if (remaining !== undefined && remaining <= 0) return;
-      const tuple = await this.toTuple(row, this.readWriteRows(row), {
+      const tuple = await this.toTuple(row, writes, {
         configurable: {
           thread_id: row.thread_id,
           checkpoint_ns: row.checkpoint_ns,
@@ -669,7 +696,7 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
         metadata: ownedBytes(metadataType, serializedMetadata),
       };
       if (!this.cut) {
-        this.db
+        this.connection(threadId, true)!
           .prepare(
             `INSERT OR REPLACE INTO checkpoints
              (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
@@ -736,18 +763,29 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
     type Statement = ReturnType<DatabaseSync['prepare']>;
     let insertOnce: Statement | undefined;
     let replace: Statement | undefined;
+    // The connection the two statements belong to. The loop below awaits serialization between
+    // writes, and in that gap the saver may close this thread's connection to open another (it
+    // keeps a bounded number open), so each write checks it still holds the same one and prepares
+    // again on the reopened connection if not.
+    let preparedOn: DatabaseSync | undefined;
+    const prepare = (): void => {
+      const db = this.connection(threadId, true)!;
+      if (db === preparedOn) return;
+      insertOnce = db.prepare(
+        `INSERT OR IGNORE INTO checkpoint_writes
+         (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      replace = db.prepare(
+        `INSERT OR REPLACE INTO checkpoint_writes
+         (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      preparedOn = db;
+    };
     if (!this.cut) {
       try {
-        insertOnce = this.db.prepare(
-          `INSERT OR IGNORE INTO checkpoint_writes
-           (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        );
-        replace = this.db.prepare(
-          `INSERT OR REPLACE INTO checkpoint_writes
-           (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-        );
+        prepare();
       } catch (error) {
         this.cutDurableWrites(error);
       }
@@ -755,7 +793,7 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
     // **Not wrapped in a transaction, deliberately.** A failure partway through this loop leaves the
     // earlier writes of the same task committed. A transaction would buy atomicity across the task's
     // slots at the cost of holding a write lock across `dumpsTyped` — serialization, inside the
-    // lock, on a file the history recorder also opens every turn. That is the trade to revisit if a
+    // lock, on a file the history recorder also writes every turn. That is the trade to revisit if a
     // reserved-channel write ever has to land atomically with an ordinary one; today none does. A
     // torn task is harmless under the degrade posture: the failure cuts durable writes and marks the
     // conversation unresumable, so nothing reads these rows again, and the loop carries on for
@@ -788,7 +826,8 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
       held.push(write);
       if (this.cut || !insertOnce || !replace) continue;
       try {
-        (idx < 0 ? replace : insertOnce).run(
+        prepare();
+        (idx < 0 ? replace! : insertOnce!).run(
           threadId,
           checkpointNs,
           checkpointId,
@@ -807,16 +846,21 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
     }
   }
 
-  /** Delete a thread from memory and from SQLite. */
+  /**
+   * Delete a thread's state from memory and from disk — its file, or, when the file is a
+   * conversation's home, its checkpoints and pending writes (see `removeThreadState`).
+   */
   async deleteThread(threadId: string): Promise<void> {
     this.mirror.deleteThread(threadId);
-    deleteThreads(this.db, [threadId]);
+    removeThreadState(this.storePath, [threadId], {
+      beforeRemove: (id) => this.release(id),
+    });
   }
 
   /**
-   * GS2-107 — delete every thread no conversation row names, past the grace window. The retention
-   * module owns the policy and the reasoning; this is the saver's own connection lent to it, so a
-   * session that already has the store open can reclaim without opening it again.
+   * GS2-107 — remove the state of every thread no conversation row names, past the grace window.
+   * The retention module owns the policy and the reasoning; this runs it over this saver's store,
+   * releasing any connection this saver holds to a thread before its file is touched.
    *
    * **Every thread this saver wrote is excluded, always**, on top of whatever the caller names. A
    * caller cannot supply that set: the runner rotates threads without telling anyone, so the only
@@ -827,25 +871,26 @@ export class GthSqliteSaver extends BaseCheckpointSaver {
   reclaimUnresumableThreads(
     options: { now?: number; graceMs?: number; excludeThreadIds?: readonly string[] } = {}
   ): ReclaimSummary {
-    return reclaimUnresumableThreads(this.db, {
+    return reclaimUnresumableThreads(this.storePath, {
       ...options,
       excludeThreadIds: [...this.writtenThreads, ...(options.excludeThreadIds ?? [])],
+      beforeRemove: (id) => this.release(id),
     });
   }
 
-  /** GS2-107 — what the checkpoint tables hold, over this saver's open connection. */
-  storeStats(dbPath: string, topN?: number): CheckpointStoreStats {
-    return collectCheckpointStoreStats(this.db, dbPath, topN);
+  /** GS2-107 — what this saver's store holds. */
+  storeStats(topN?: number): CheckpointStoreStats {
+    return collectCheckpointStoreStats(this.storePath, topN);
   }
 }
 
 /**
- * Fail-soft open of the durable checkpoint saver. Returns `null` (never throws) when the DB cannot
- * be opened or its tables cannot be created.
+ * Fail-soft open of the durable checkpoint saver over the store at `storePath`. Returns `null`
+ * (never throws) when the store cannot be opened or created.
  */
 export function openCheckpointSaver(
-  dbPath: string,
+  storePath: string,
   options: CheckpointSaverOptions = {}
 ): GthSqliteSaver | null {
-  return GthSqliteSaver.open(dbPath, options);
+  return GthSqliteSaver.open(storePath, options);
 }

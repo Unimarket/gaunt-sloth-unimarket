@@ -164,7 +164,7 @@ configCommand(program, cliConfigOverrides);
 // GS2-20 — `history resume <id>` is the exception: it starts a session, so it takes the overrides
 // the session commands take.
 historyCommand(program, cliConfigOverrides);
-insightsCommand(program);
+insightsCommand(program, cliConfigOverrides);
 // GS2-6 (B16) — model catalog: lists providers/models enriched with models.dev cost/limit metadata.
 // Read-only; enrichment never gates what `/v1/models` reports as callable.
 modelsCommand(program);

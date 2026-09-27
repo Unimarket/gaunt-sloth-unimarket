@@ -1,6 +1,14 @@
 import { Command } from 'commander';
-import { initConfig, type CommandLineConfigOverrides } from '@gaunt-sloth/core/config.js';
-import { openHistoryStore, resolveHistoryDbPath } from '@gaunt-sloth/core/history/historyStore.js';
+import {
+  initConfig,
+  loadConfiguredHistoryDbPath,
+  type CommandLineConfigOverrides,
+} from '@gaunt-sloth/core/config.js';
+import {
+  openHistoryStore,
+  rebuildHistoryIndexSafe,
+  resolveHistoryDbPath,
+} from '@gaunt-sloth/core/history/historyStore.js';
 import { isHistoryEnabled } from '@gaunt-sloth/core/history/historyEnabled.js';
 import {
   lookupConversationSafe,
@@ -31,7 +39,6 @@ import {
 } from '@gaunt-sloth/core/utils/consoleUtils.js';
 import { getStringFromStdin, setExitCode } from '@gaunt-sloth/core/utils/systemUtils.js';
 import { resumeMatrixVerdict } from '@gaunt-sloth/core/history/resumeMatrix.js';
-import { statSync } from 'node:fs';
 
 /**
  * The one sentence for "there is no store": `list`, `search`, `show` and `resume` all say it, so a
@@ -43,6 +50,24 @@ export const NO_HISTORY_MESSAGE =
   'config turns it off.';
 import { startSession } from '#src/modules/startSession.js';
 import { sessionConfigFor } from '#src/modules/sessionConfigs.js';
+
+/** The `--db` help text every read-only history command shares. */
+const DB_OPTION_HELP =
+  'path to the history store (defaults to `history.dbPath` from your config, then ' +
+  '~/.gsloth/history.db)';
+
+/**
+ * GS2-119 — the store a read-only history command opens: `--db`, then `history.dbPath` from the
+ * config these overrides select, then the default. The same precedence as every recorder, which is
+ * what makes `history list` show the store a run wrote. Exported for `gth insights`.
+ */
+export async function resolveHistoryCommandStore(
+  db: string | undefined,
+  commandLineConfigOverrides: CommandLineConfigOverrides
+): Promise<string> {
+  if (db !== undefined && db.trim().length > 0) return resolveHistoryDbPath(db);
+  return resolveHistoryDbPath(await loadConfiguredHistoryDbPath(commandLineConfigOverrides));
+}
 
 /**
  * GS2-7 (B20) / GS2-19 — the `gth history` command group over the local session store.
@@ -57,13 +82,14 @@ import { sessionConfigFor } from '#src/modules/sessionConfigs.js';
  *   or `exec` run, with the new message, for a single-shot one.
  *
  * The first three are READ-ONLY and fail-soft: they open the store with `create: false`, so a
- * missing DB (nothing recorded yet, or history turned off) simply reports "no history yet" instead
- * of materialising an empty file.
- * (Opening still migrates a pre-GS2-19 DB in place — see {@link @gaunt-sloth/core!history/historyStore.HistoryStore | HistoryStore} migrate.) The DB
- * defaults to the global `~/.gsloth/history.db`; `--db <path>` overrides it. Local only — nothing
- * here touches the network.
+ * missing store (nothing recorded yet, or history turned off) simply reports "no history yet"
+ * instead of materialising an empty one. (Opening still migrates the store: a single-file store
+ * from an earlier release is split on first open — see `historyLayout.ts` in core.) The store is
+ * `--db <path>`, then `history.dbPath` from the config, then the global `~/.gsloth/history.db`
+ * (GS2-119). `history.enabled: false` does not stop them reading a store that exists: the switch
+ * governs recording. Local only — nothing here touches the network.
  *
- * `resume` is the exception on both counts: it starts a session, so it loads the config the
+ * `resume` is the exception on both counts: it starts a session, so it loads the whole config the
  * session will run under (which is also where `history.dbPath` and `history.enabled` come from —
  * hence no `--db`: a resumed session must read the store the session itself records to) and takes
  * the same command-line overrides the session commands take.
@@ -83,17 +109,19 @@ export function historyCommand(
         '  $ gth history search vertexai timeout\n' +
         '  $ gth history show 42\n' +
         '  $ gth history resume 42\n' +
-        '  $ gth history resume 43 "and now the tests"\n'
+        '  $ gth history resume 43 "and now the tests"\n' +
+        '  $ gth history rebuild\n'
     );
 
   history
     .command('search')
     .description('Full-text search past sessions (SQLite FTS5)')
     .argument('<query...>', 'search terms')
-    .option('--db <path>', 'path to the history DB (defaults to ~/.gsloth/history.db)')
+    .option('--db <path>', DB_OPTION_HELP)
     .option('--limit <n>', 'maximum results', '20')
-    .action((queryParts: string[], options: { db?: string; limit?: string }) => {
-      const store = openHistoryStore(resolveHistoryDbPath(options.db), { create: false });
+    .action(async (queryParts: string[], options: { db?: string; limit?: string }) => {
+      const storePath = await resolveHistoryCommandStore(options.db, commandLineConfigOverrides);
+      const store = openHistoryStore(storePath, { create: false });
       if (!store) {
         displayWarning(NO_HISTORY_MESSAGE);
         return;
@@ -111,10 +139,10 @@ export function historyCommand(
   history
     .command('list')
     .description('List the most recent recorded conversations')
-    .option('--db <path>', 'path to the history DB (defaults to ~/.gsloth/history.db)')
+    .option('--db <path>', DB_OPTION_HELP)
     .option('--limit <n>', 'maximum results', '20')
-    .action((options: { db?: string; limit?: string }) => {
-      const dbPath = resolveHistoryDbPath(options.db);
+    .action(async (options: { db?: string; limit?: string }) => {
+      const dbPath = await resolveHistoryCommandStore(options.db, commandLineConfigOverrides);
       const store = openHistoryStore(dbPath, { create: false });
       if (!store) {
         displayWarning(NO_HISTORY_MESSAGE);
@@ -139,7 +167,7 @@ export function historyCommand(
       const maintenance = openCheckpointMaintenance(dbPath);
       if (!maintenance) return;
       try {
-        const stats = maintenance.stats(dbPath);
+        const stats = maintenance.stats();
         // GS2-111 — checkpoints are not the whole store. A dropped `put` leaves a thread holding
         // pending writes and no checkpoint: real bytes on disk that only `gth history prune` takes
         // back. A guard on the checkpoint count alone made the one screen that reports the store's
@@ -156,8 +184,8 @@ export function historyCommand(
     .command('show')
     .description('Print a whole conversation thread (all turns in order)')
     .argument('<id>', 'conversation id or run id (from `history list` / `history search`)')
-    .option('--db <path>', 'path to the history DB (defaults to ~/.gsloth/history.db)')
-    .action((idArg: string, options: { db?: string }) => {
+    .option('--db <path>', DB_OPTION_HELP)
+    .action(async (idArg: string, options: { db?: string }) => {
       // GS2-106 — the shared parser, so `12abc` is refused rather than read as 12, and a run id is
       // accepted here exactly as `history resume` accepts it.
       const ref = parseConversationRef(idArg);
@@ -165,7 +193,8 @@ export function historyCommand(
         displayWarning(`Invalid conversation id "${idArg}".`);
         return;
       }
-      const store = openHistoryStore(resolveHistoryDbPath(options.db), { create: false });
+      const storePath = await resolveHistoryCommandStore(options.db, commandLineConfigOverrides);
+      const store = openHistoryStore(storePath, { create: false });
       if (!store) {
         displayWarning(NO_HISTORY_MESSAGE);
         return;
@@ -196,7 +225,7 @@ export function historyCommand(
   //   GS2-20 was built to ("resume sheds nothing") forbids;
   // - it prints the plan and removes nothing until `--yes`. The dry run is the default because the
   //   second layer of it matters more than the keystroke: an invocation that forgets `--db` resolves
-  //   to the developer's own `~/.gsloth/history.db`;
+  //   to the configured store or the developer's own `~/.gsloth/history.db`;
   // - it prunes WHOLE conversations. A count bound here means "keep the N most recent
   //   conversations", never "keep the last N super-steps of a thread" — a checkpoint chain is not
   //   safe to truncate in the middle as a policy, whatever one graph's channel schema allows today.
@@ -206,7 +235,7 @@ export function historyCommand(
     .option('--older-than <days>', 'prune conversations with no activity for this many days')
     .option('--keep-last <n>', 'keep the N most recently active conversations, prune the rest')
     .option('--yes', 'actually remove; without it this prints the plan and changes nothing')
-    .option('--db <path>', 'path to the history DB (defaults to ~/.gsloth/history.db)')
+    .option('--db <path>', DB_OPTION_HELP)
     .addHelpText(
       'after',
       '\n' +
@@ -221,65 +250,106 @@ export function historyCommand(
         '  $ gth history prune --older-than 30\n' +
         '  $ gth history prune --keep-last 20 --yes\n'
     )
-    .action((options: { olderThan?: string; keepLast?: string; yes?: boolean; db?: string }) => {
-      const olderThanDays = parseBound(options.olderThan, 'older-than');
-      const keepLast = parseBound(options.keepLast, 'keep-last');
-      if (olderThanDays === 'invalid' || keepLast === 'invalid') return;
-      if (olderThanDays === undefined && keepLast === undefined) {
-        displayWarning(
-          'Nothing was removed: `gth history prune` needs a bound. Use `--older-than <days>`, ' +
-            '`--keep-last <n>`, or both — this command can make a conversation unresumable, so it ' +
-            'never picks one for you.'
-        );
-        return;
-      }
-      const dbPath = resolveHistoryDbPath(options.db);
-      const maintenance = openCheckpointMaintenance(dbPath);
-      if (!maintenance) {
-        displayWarning(NO_HISTORY_MESSAGE);
-        return;
-      }
-      try {
-        const bounds: PruneBounds = { olderThanDays, keepLast };
-        const candidates = maintenance.prunable(bounds);
-        // The automatic set rides along: it is free, it cannot cost a resume, and reporting it here
-        // is how a person finds out how much of the store was never reachable in the first place.
-        const unaddressable = maintenance.unaddressable();
-        const unaddressableBytes = maintenance.bytesOf(unaddressable);
-        // GS2-108 — and so does the write-only set: threads whose pending writes outlived the
-        // checkpoint they belonged to. This is the ONLY command that reaches them, because they
-        // carry no checkpoint to read an age from and the automatic pass reclaims nothing it
-        // cannot date. The reasoning is at `findWriteOnlyThreads`.
-        const writeOnly = maintenance.writeOnly();
-        const writeOnlyBytes = maintenance.bytesOf(writeOnly);
-        displayInfo('History prune:');
-        for (const line of formatPrunePlan(
-          candidates,
-          unaddressable.length,
-          unaddressableBytes,
-          writeOnly.length,
-          writeOnlyBytes
-        )) {
-          display(line);
-        }
-        if (candidates.length === 0 && unaddressable.length === 0 && writeOnly.length === 0) return;
-        if (!options.yes) {
-          displayWarning('Nothing was removed. Re-run with `--yes` to remove it.');
+    .action(
+      async (options: { olderThan?: string; keepLast?: string; yes?: boolean; db?: string }) => {
+        const olderThanDays = parseBound(options.olderThan, 'older-than');
+        const keepLast = parseBound(options.keepLast, 'keep-last');
+        if (olderThanDays === 'invalid' || keepLast === 'invalid') return;
+        if (olderThanDays === undefined && keepLast === undefined) {
+          displayWarning(
+            'Nothing was removed: `gth history prune` needs a bound. Use `--older-than <days>`, ' +
+              '`--keep-last <n>`, or both — this command can make a conversation unresumable, so it ' +
+              'never picks one for you.'
+          );
           return;
         }
-        const before = fileBytes(dbPath);
-        const removed = maintenance.remove([
-          ...candidates.map((c) => c.threadId),
-          ...unaddressable,
-          ...writeOnly,
-        ]);
-        const vacuumed = maintenance.vacuum();
-        const after = fileBytes(dbPath);
-        for (const line of formatPruneResult(removed, before, after, vacuumed)) display(line);
-        displaySuccess('History prune complete.');
-      } finally {
-        maintenance.close();
+        const dbPath = await resolveHistoryCommandStore(options.db, commandLineConfigOverrides);
+        const maintenance = openCheckpointMaintenance(dbPath);
+        if (!maintenance) {
+          displayWarning(NO_HISTORY_MESSAGE);
+          return;
+        }
+        try {
+          const bounds: PruneBounds = { olderThanDays, keepLast };
+          const candidates = maintenance.prunable(bounds);
+          // The automatic set rides along: it is free, it cannot cost a resume, and reporting it here
+          // is how a person finds out how much of the store was never reachable in the first place.
+          const unaddressable = maintenance.unaddressable();
+          const unaddressableBytes = maintenance.bytesOf(unaddressable);
+          // GS2-108 — and so does the write-only set: threads whose pending writes outlived the
+          // checkpoint they belonged to. This is the ONLY command that reaches them, because they
+          // carry no checkpoint to read an age from and the automatic pass reclaims nothing it
+          // cannot date. The reasoning is at `findWriteOnlyThreads`.
+          const writeOnly = maintenance.writeOnly();
+          const writeOnlyBytes = maintenance.bytesOf(writeOnly);
+          displayInfo('History prune:');
+          for (const line of formatPrunePlan(
+            candidates,
+            unaddressable.length,
+            unaddressableBytes,
+            writeOnly.length,
+            writeOnlyBytes
+          )) {
+            display(line);
+          }
+          if (candidates.length === 0 && unaddressable.length === 0 && writeOnly.length === 0)
+            return;
+          if (!options.yes) {
+            displayWarning('Nothing was removed. Re-run with `--yes` to remove it.');
+            return;
+          }
+          const before = maintenance.diskBytes();
+          // GS2-121 — each thread's state is its own file: removing it deletes the file, or strips
+          // and compacts a conversation's home file, so the space comes back thread by thread.
+          const removed = maintenance.remove([
+            ...candidates.map((c) => c.threadId),
+            ...unaddressable,
+            ...writeOnly,
+          ]);
+          const after = maintenance.diskBytes();
+          for (const line of formatPruneResult(removed, before, after, true)) display(line);
+          displaySuccess('History prune complete.');
+        } finally {
+          maintenance.close();
+        }
       }
+    );
+
+  // GS2-121 — the index is a cache of the thread files, and this rebuilds it from them alone: what
+  // a person runs when `index.db` is damaged or was deleted, or when thread files were copied in
+  // from elsewhere. A missing index is rebuilt on its own at the next open; this also replaces one
+  // that is there. Conversations keep their ids.
+  history
+    .command('rebuild')
+    .description('Rebuild the history index from the per-conversation files')
+    .option('--db <path>', DB_OPTION_HELP)
+    .addHelpText(
+      'after',
+      '\n' +
+        'Run it with no session open: a session that writes during the rebuild writes to the\n' +
+        'index being replaced.\n'
+    )
+    .action(async (options: { db?: string }) => {
+      const storePath = await resolveHistoryCommandStore(options.db, commandLineConfigOverrides);
+      const summary = rebuildHistoryIndexSafe(storePath);
+      if (!summary) {
+        displayWarning(NO_HISTORY_MESSAGE);
+        setExitCode(1);
+        return;
+      }
+      display(
+        `Rebuilt the index from ${summary.threadFiles} thread ` +
+          `${summary.threadFiles === 1 ? 'file' : 'files'}: ${summary.conversations} ` +
+          `${summary.conversations === 1 ? 'conversation' : 'conversations'}, ${summary.turns} ` +
+          `${summary.turns === 1 ? 'turn' : 'turns'}.`
+      );
+      if (summary.unreadable > 0) {
+        displayWarning(
+          `${summary.unreadable} ${summary.unreadable === 1 ? 'file' : 'files'} in the store ` +
+            'could not be read and were left as they are.'
+        );
+      }
+      displaySuccess('History rebuild complete.');
     });
 
   // GS2-20 — the third spelling of a resume. The mode comes from the ROW, not from the person: a
@@ -418,15 +488,6 @@ function parseBound(raw: string | undefined, flag: string): number | undefined |
     return 'invalid';
   }
   return n;
-}
-
-/** The database file's size on disk, or 0 when it cannot be read. */
-function fileBytes(dbPath: string): number {
-  try {
-    return statSync(dbPath).size;
-  } catch {
-    return 0;
-  }
 }
 
 /** Parse and bound a `--limit` option (1..500); falls back to 20 on a bad value. */
