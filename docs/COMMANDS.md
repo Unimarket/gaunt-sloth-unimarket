@@ -241,7 +241,7 @@ git diff | gth review -m "Please focus on security implications"
 Ask questions about code or general programming topics.
 
 ```bash
-gth ask [message]
+gth ask [message] [--resume <id>]
 ```
 
 ### Arguments
@@ -249,9 +249,12 @@ gth ask [message]
 
 ### Options
 - `-f, --file [files...]` - Input files to include with the question
+- `--resume <id>` - Ask a follow-up inside a recorded conversation instead of starting a new one. The id is the number or the run id `gth history list` prints. See [Resuming a conversation](#resuming-a-conversation).
 
 ### Description
 Ask questions with optional file context. At least one input source (message, file, or stdin) is required.
+
+When the run is recorded, it ends with a line on stderr naming the command that continues it — for example `To continue this conversation: gth ask --resume 3f2a9c1e-5b7d-4e8a-9c0f-1d2e3f4a5b6c "…"`. Replace the `…` with your follow-up. `output.resumeHint` in the config turns the line off or adds detail — see [Resume hint](configuration/output.md#resume-hint-outputresumehint).
 
 ### Examples
 ```bash
@@ -266,6 +269,9 @@ gth ask "How do these modules interact?" -f module1.js module2.js
 
 # Use with stdin
 cat error.log | gth ask "What might be causing these errors?"
+
+# Follow up on conversation 42, with everything the first run looked at still in front of the model
+gth ask --resume 42 "and what about the second one?"
 ```
 
 ## exec
@@ -285,10 +291,11 @@ gth exec [script]
 - `-m, --message <text>` - Inline prompt text to execute instead of a script file path. Cannot be combined with `[script]`.
 - `-f, --file [files...]` - Additional context files. Their content is added BEFORE the script.
 - `-t, --temperature <number>` - LLM sampling temperature for this run (`0` = most deterministic).
+- `--resume <id>` - Continue a recorded conversation with the `-m` text as the next message. Only `-m` can carry the new input: a script path, `-f` files, or a script on stdin is refused, and nothing runs. See [Resuming a conversation](#resuming-a-conversation).
 - `--allow-dir <path>` - **Has no effect in this release** (repeatable). It widened filesystem access beyond the cwd for the deepagents backend, which has been removed; the flag still parses and warns on use, and the agent reads and writes within the working directory only.
 
 ### Description
-The script is resolved in precedence order: `-m/--message` inline text, then the `[script]` path argument, then stdin. Extra `-f` files are prepended as context. `exec` runs the same single-shot agent runtime as `ask`, tuned for reproducible "do-the-job" runs.
+The script is resolved in precedence order: `-m/--message` inline text, then the `[script]` path argument, then stdin. Extra `-f` files are prepended as context. `exec` runs the same single-shot agent runtime as `ask`, tuned for reproducible "do-the-job" runs. Like `ask`, a recorded run ends with the command that continues it on stderr, here in the form `gth exec --resume <run id> -m "…"`.
 
 ### Examples
 ```bash
@@ -306,6 +313,9 @@ gth exec scripts/build-fix.md -f error.log package.json
 
 # Save the result as a report file instead of (only) streaming it to stdout
 gth exec scripts/release-notes.md -w RELEASE_NOTES.md
+
+# Continue conversation 42 with one more instruction
+gth exec --resume 42 -m "now do the same for the tests"
 ```
 
 ## chat
@@ -399,19 +409,36 @@ gth code --resume 42
 
 ### Resuming a conversation
 
-Every interactive `chat` / `code` session is recorded in the local history store (see
+Every `chat`, `code`, `ask` and `exec` run is recorded in the local history store (see
 [`history`](#history)) together with the model's conversation state, so it can be picked up later
-from where it stopped. A conversation is named by either of the two ids `gth history list` prints:
-its number, or its run id. The run id stays correct if the history database is deleted and
-recreated, where the numbers start again from 1. Three spellings do the same thing:
+from where it stopped — including the tool results it gathered, not only the text it answered with.
+A conversation is named by either of the two ids `gth history list` prints: its number, or its run
+id. The run id stays correct if the history database is deleted and recreated, where the numbers
+start again from 1.
 
+Say `gth ask "which of our dependencies are unmaintained?"` read your lockfile and ended with
+`To continue this conversation: gth ask --resume 3f2a9c1e-5b7d-4e8a-9c0f-1d2e3f4a5b6c "…"`. Then
+`gth ask --resume 3f2a9c1e-5b7d-4e8a-9c0f-1d2e3f4a5b6c "which of those have a maintained fork?"`
+runs with the lockfile contents the first run read still in front of the model, and records the
+follow-up as the second turn of the same conversation.
+
+The spellings:
+
+- `gth ask --resume <id> "…"` / `gth exec --resume <id> -m "…"` — run one more turn in that
+  conversation and exit;
 - `gth chat --resume <id>` / `gth code --resume <id>` / `gth --resume <id>` — start a session inside
   that conversation, in the mode you name;
-- `gth history resume <id>` — the same, in the mode the conversation was recorded under;
+- `gth history resume <id> [message]` — continue it as the command it was recorded under: an `ask`
+  or `exec` conversation runs one more turn and needs the message (as an argument or on stdin); a
+  `chat` or `code` conversation opens a session, with the message as its first one if you give it;
 - `/resume <id>` inside a running session — move this session onto that conversation. **`/resume`
   alone offers the ones that can be resumed**: in the full-screen TUI as a list you move through
   with the arrow keys — Enter resumes the highlighted conversation, Esc leaves the session where it
   is — and on the plain terminal surface as a printed list you pick an id from.
+
+Any of these takes any of the four kinds of conversation: an `ask` conversation can go on in
+`gth chat --resume`, and a `code` conversation can take one more `gth exec --resume` turn. The
+conversation keeps the command it was recorded under in `gth history list`.
 
 A resumed session shows a banner naming the conversation (its id, when it started, how many turns it
 holds and which command and model recorded it), replays the recorded turns, and then continues: the
@@ -421,14 +448,20 @@ project file could not be written — are kept with it and are in force again, s
 is the conversation, not the process that made it. Nothing already in the project allow-list or
 deny-list is affected either way.
 
+**`ask --resume` and `exec --resume` do not restore those approvals**, and neither does
+`gth history resume` of an `ask` or `exec` conversation: a single turn run from the shell, where
+nobody may be watching, runs only with what your config allows.
+
 A resume is refused, with a message saying which of these it was, when: history is off
 (`history.enabled: false`); the store could not be opened; there is no such conversation; the
-conversation was recorded by a single-shot `ask` / `exec` run, which cannot be resumed into a
-session yet; the conversation has no state to re-enter (its checkpoint could not be written, or
-was pruned); or it was recorded in a different directory — a conversation is resumed
-from the project it was recorded in. A `--resume` typed in front of any other subcommand
-(`gth --resume 12 ask "…"`) is refused as well: resuming into `ask` or `exec` is not available yet,
-and nothing runs in its place.
+conversation was recorded by a command other than `ask`, `exec`, `chat` or `code` (`review`, say);
+it is one cell of a `batch`, `eval` or `workflow` run — `gth history show` still prints it; the
+conversation has no state to re-enter (its checkpoint could not be written, or was pruned); its
+last run stopped at an approval, on a tool call nobody answered — `ask --resume` and
+`exec --resume` refuse any such conversation, and nothing resumes an `ask` or `exec` one in that
+state; or it was recorded in a different directory — a conversation is resumed from the project it
+was recorded in. A `--resume` typed in front of any other subcommand (`gth --resume 12 review`) is
+refused as well. Every refusal exits with status 1, and nothing runs in its place.
 
 ## eval
 
@@ -1480,7 +1513,7 @@ Search and list locally-recorded session history.
 gth history list [--limit <n>] [--db <path>]
 gth history search <query...> [--limit <n>] [--db <path>]
 gth history show <id> [--db <path>]
-gth history resume <id>
+gth history resume <id> [message]
 gth history prune [--older-than <days>] [--keep-last <n>] [--yes] [--db <path>]
 ```
 
@@ -1490,7 +1523,7 @@ Recording is **on by default and local only** — nothing here touches the netwo
 - `history list` - List the most recent conversations, grouped with a turn count and timespan. Each shows its number and its run id; a conversation recorded before run ids existed shows a dashed placeholder and is named by its number.
 - `history search` - Full-text search across past turns (SQLite FTS5); each hit shows the conversation it belongs to.
 - `history show` - Print a whole conversation thread, all turns in order. Takes the number or the run id; anything else, or an id no conversation has, is refused by name.
-- `history resume` - Start an interactive session inside a recorded conversation, in the mode (`chat` or `code`) it was recorded under, with its approvals in force again. Takes the number or the run id. A conversation recorded by a single-shot command (`ask`, `exec`, …) cannot be resumed yet and is reported as such; `history show` still prints it. Takes no `--db`: the session reads the store its own config names.
+- `history resume` - Continue a recorded conversation as the command it was recorded under. A `chat` or `code` conversation opens an interactive session with its approvals in force again, and an optional `[message]` becomes its first message. An `ask` or `exec` conversation runs one more turn, which needs the message — as the argument or on stdin — and restores no approvals. Takes the number or the run id. A conversation nothing can resume (see [Resuming a conversation](#resuming-a-conversation)) is refused with exit status 1; `history show` still prints it. Takes no `--db`: the run reads the store its own config names.
 - `history prune` - Remove stored conversation state and give the disk space back. See [What the store keeps, and what reclaims it](#what-the-store-keeps-and-what-reclaims-it).
 
 ### What the store keeps, and what reclaims it
@@ -1508,6 +1541,7 @@ Pruning takes whole conversations, never part of one, and it **keeps the transcr
 
 ### Arguments
 - `<query...>` - (`history search`) One or more search terms.
+- `[message]` - (`history resume`) The next message. Required for an `ask` or `exec` conversation unless it is piped on stdin; optional for `chat` or `code`.
 - `<id>` - (`history show` / `history resume`) Conversation id, as printed by `history list` / `history search`.
 
 ### Options
@@ -1530,6 +1564,9 @@ gth history show 42
 
 # Pick conversation 42 up where it left off, in the mode it was recorded under
 gth history resume 42
+
+# Ask one more question in conversation 43, recorded by `gth ask`
+gth history resume 43 "and now the tests"
 
 # See what pruning everything untouched for 30 days would remove — removes nothing
 gth history prune --older-than 30

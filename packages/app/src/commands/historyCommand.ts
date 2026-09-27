@@ -82,7 +82,8 @@ export function historyCommand(
         '  $ gth history list\n' +
         '  $ gth history search vertexai timeout\n' +
         '  $ gth history show 42\n' +
-        '  $ gth history resume 42\n'
+        '  $ gth history resume 42\n' +
+        '  $ gth history resume 43 "and now the tests"\n'
     );
 
   history

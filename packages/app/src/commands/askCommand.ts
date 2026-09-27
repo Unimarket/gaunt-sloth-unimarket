@@ -87,7 +87,7 @@ export function askCommand(
         '  $ gth ask "which types of primitives are available in JavaScript?"\n' +
         '  $ gth ask "Please explain this code" -f index.js\n' +
         '  $ cat error.log | gth ask "What might be causing these errors?"\n' +
-        '  $ gth ask --resume <run id> "and what about the second one?"\n'
+        '  $ gth ask --resume 42 "and what about the second one?"\n'
     )
     .action(async (message: string, options: AskCommandOptions & { resume?: ConversationRef }) => {
       // GS2-106 — `--resume` on `ask` itself, or the root `gth --resume <id> ask …`: the same

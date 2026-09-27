@@ -122,7 +122,7 @@ export function execCommand(
         '  $ cat scripts/lint-summary.md | gth exec\n' +
         '  $ gth exec scripts/build-fix.md -f error.log package.json\n' +
         '  $ gth exec scripts/release-notes.md -w RELEASE_NOTES.md\n' +
-        '  $ gth exec --resume <run id> -m "now do the same for the tests"\n'
+        '  $ gth exec --resume 42 -m "now do the same for the tests"\n'
     )
     .addOption(resumeOption())
     .action(
@@ -176,7 +176,7 @@ function execResumeInputRefusal(
  * (GS2-106), so both spellings run exactly one implementation.
  *
  * `resume`, when given, continues that conversation with `-m` as the new user message; see
- * {@link execResumeInputRefusal} for the input it refuses. The seam resolves and checks the
+ * `execResumeInputRefusal` for the input it refuses. The seam resolves and checks the
  * conversation first, and a refusal ends the command with exit status 1 and nothing run.
  */
 export async function runExecCommand(

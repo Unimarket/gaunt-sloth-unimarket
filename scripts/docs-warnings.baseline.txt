@@ -23,11 +23,9 @@
 "gaunt-sloth.tui/components/PromptEditor.PromptEditor" links to "gaunt-sloth.tui/components/PromptEditor.PromptEditor.__namedParameters.__type.state" with text "state" which exists but does not have a link in the documentation, will link to "gaunt-sloth.tui/components/PromptEditor.PromptEditor" instead.
 AgUiWireMessage, defined in @gaunt-sloth/agent/src/modules/apiAgUiModule.ts, is referenced by modules/apiAgUiModule.js.convertMessage.msg but not included in the documentation
 AlignmentToolSet, defined in @gaunt-sloth/core/src/core/shell/alignment.ts, is referenced by core/shell/alignment.createAlignmentTools but not included in the documentation
-AskCommandOptions, defined in gaunt-sloth/src/commands/askCommand.ts, is referenced by commands/askCommand.applyAskWriteMode.options but not included in the documentation
 AskFn, defined in gaunt-sloth/src/commands/firstRunDialog.ts, is referenced by commands/firstRunDialog.FirstRunDialogDeps.ask but not included in the documentation
 CarveInputs, defined in @gaunt-sloth/core/src/core/shell/rater.ts, is referenced by core/shell/rater.effectivePreflightFloorFinding.carve but not included in the documentation
 ConvertMessageOptions, defined in @gaunt-sloth/agent/src/modules/apiAgUiModule.ts, is referenced by modules/apiAgUiModule.js.convertMessage.options but not included in the documentation
-ExecCommandOptions, defined in gaunt-sloth/src/commands/execCommand.ts, is referenced by commands/execCommand.buildExecConfig.options but not included in the documentation
 InlineBinaryBlock, defined in @gaunt-sloth/core/src/utils/binaryOutputUtils.ts, is referenced by utils/binaryOutputUtils.extractInlineBinaryBlocks but not included in the documentation
 NativeToolCall, defined in @gaunt-sloth/core/src/core/toolCallRepair/promote.ts, is referenced by core/toolCallRepair/promote.textToNativeToolCalls but not included in the documentation
 NormalizedRatingConfig, defined in @gaunt-sloth/review/src/middleware/reviewRateMiddleware.ts, is referenced by middleware/reviewRateMiddleware.normalizeRatingConfig but not included in the documentation

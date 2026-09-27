@@ -380,6 +380,42 @@ setting and always shows the full header.
 A boolean fails config validation, with a message naming the rung that replaces it — see
 [Migrating to 2.0](../MIGRATION.md).
 
+## Resume hint (output.resumeHint)
+
+A recorded `gth ask` or `gth exec` run ends with one line on stderr naming the command that
+continues the conversation:
+
+```
+To continue this conversation: gth ask --resume 3f2a9c1e-5b7d-4e8a-9c0f-1d2e3f4a5b6c "…"
+```
+
+Replace the `…` with your follow-up and run it. `exec` names `gth exec --resume <run id> -m "…"`.
+The line goes to stderr, so `gth ask … > answer.txt` still writes only the answer. See
+[Resuming a conversation](../COMMANDS.md#resuming-a-conversation) for what a resume carries over —
+and that it does not bring back approvals granted in an interactive session: an
+`ask`/`exec --resume` turn runs only with what your config allows.
+
+`output.resumeHint` takes the same three rungs as `output.header`:
+
+| rung | what the run ends with |
+| --- | --- |
+| `compact` (default) | The one line above. |
+| `debug` | The line, then the conversation's number and the history file it is stored in. When a run gets no line, `debug` prints why instead — history is off, the checkpoint could not be written, or the run stopped at an approval with a tool call nobody answered, which a resume would refuse. |
+| `none` | Nothing. |
+
+```json
+{
+  "output": {
+    "resumeHint": "none"
+  }
+}
+```
+
+The line appears only when pasting it would work, so a run that was not recorded, or that no
+resume would accept, ends without it. A conversation recorded before run ids existed is named by
+its number instead, which is valid only in that history file; `debug` says so. `batch`, `eval` and
+`workflow` runs never print the line.
+
 ## End of run recap (recap)
 
 A long `gth code` session finishes, the last thing on screen is a paragraph of prose, and you want
