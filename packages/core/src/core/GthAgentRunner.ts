@@ -1476,12 +1476,9 @@ export class GthAgentRunner {
       // [[CFG-84]] — **the quota cooldown seam: catch, read retry hint, sleep, retry turn.**
       //
       // When a Gemini call fails with a 429 whose quota is per-minute, and the provider names a
-      // short wait (under 90s), wait that long, tell the user we are waiting, and re-send instead
-      // of ending the run.
-      //
-      // Measurement established that re-running the turn resumes from the checkpoint without
-      // re-running already completed tools (the EXT-160 shape).
-      // AI rater calls on the same key are out of scope for this version.
+      // short wait (90s at most), wait that long, tell the user we are waiting, and re-send
+      // instead of ending the run. The retry shape, and the measurement that chose it, are on
+      // {@link handleQuotaCooldown}.
       const retryAfterCooldown = await this.handleQuotaCooldown(error, quotaCooldownAttempts);
       if (retryAfterCooldown) {
         const answer = await this.runTurn([], attempt, quotaCooldownAttempts + 1);
@@ -3623,35 +3620,32 @@ export class GthAgentRunner {
       yield* track(this.resolveToolInterruptsWithEvents(signal));
     }.bind(this);
 
+    // [[CFG-84]] — the quota cooldown around the overflow loop, deciding through the same
+    // {@link handleQuotaCooldown} the string path calls. The overflow attempt carries across a
+    // cooldown, so a turn still compacts at most once however many cooldowns it spends.
     const attemptWithCooldown = async function* (
       this: GthAgentRunner,
-      quotaAttempt = 0
+      quotaAttempt: number,
+      startAttempt: number
     ): AsyncGenerator<AgentStreamEvent> {
+      let lastAttempt = startAttempt;
       try {
-        const boundAttemptOnce = (attempt: number) => attemptOnce(attempt, quotaAttempt);
-        yield* retryEventTurnOnContextOverflow(boundAttemptOnce, this.contextOverflowSeamHost());
+        const boundAttemptOnce = (attempt: number) => {
+          lastAttempt = attempt;
+          return attemptOnce(attempt, quotaAttempt);
+        };
+        yield* retryEventTurnOnContextOverflow(
+          boundAttemptOnce,
+          this.contextOverflowSeamHost(),
+          startAttempt
+        );
       } catch (error) {
-        const category =
-          terminationReasonOf(error)?.category ?? classifyThrownTermination(error).category;
-        const hint = readQuotaRetryHint(error);
-        if (
-          category === 'rate_limited' &&
-          hint &&
-          hint.perMinute &&
-          isWithinQuotaCooldownBound(hint.waitMs) &&
-          quotaAttempt < MAX_QUOTA_COOLDOWNS_PER_TURN
-        ) {
-          this.statusUpdate(StatusLevel.WARNING, quotaCooldownWaitMessage(hint.waitMs));
-          await new Promise<void>((resolve) => setTimeout(resolve, hint.waitMs));
-          this.resetTerminationReason();
-          yield* attemptWithCooldown(quotaAttempt + 1);
-          return;
-        }
-        throw error;
+        if (!(await this.handleQuotaCooldown(error, quotaAttempt))) throw error;
+        yield* attemptWithCooldown(quotaAttempt + 1, lastAttempt);
       }
     }.bind(this);
 
-    yield* attemptWithCooldown(0);
+    yield* attemptWithCooldown(0, 0);
   }
 
   /**
@@ -4192,12 +4186,23 @@ export class GthAgentRunner {
    * CFG-84 — **the quota cooldown seam: catch, read retry hint, sleep, retry turn.**
    *
    * When a Gemini call fails with a 429 whose quota is per-minute, and the provider names a
-   * short wait (under 90s), wait that long, tell the user we are waiting, and re-send instead
+   * short wait (90s at most), wait that long, tell the user we are waiting, and re-send instead
    * of ending the run.
    *
-   * Measurement established that re-running the turn resumes from the checkpoint without
-   * re-running already completed tools (the EXT-160 shape).
-   * AI rater calls on the same key are out of scope for this version.
+   * **Retry shape: the whole turn is re-run with an empty message list (the EXT-160 shape).**
+   * Measured in `quotaCooldownRunner.spec.ts`: a scripted model asks for a tool on its first call
+   * and throws the recorded 429 on its second; re-running the turn resumes from the checkpoint the
+   * tool step committed, so the model's third call already sees the tool's result and the tool
+   * runs exactly once, on the string path (streaming and not) and on the typed-event path alike.
+   * A wrapper around the model call alone was therefore not needed.
+   *
+   * On the streaming string path this runs on the `Stream processing failed` wrapper, not the
+   * original error. The wrapper keeps the original as its `cause`, which is what lets
+   * {@link readQuotaRetryHint} still see the status and the response body.
+   *
+   * Covers the Gemini API client only; every other provider keeps today's behaviour. The AI
+   * rater's calls on the same key are out of scope for this version and escalate as today, and so
+   * is the AG-UI server's own turn loop, which does not go through this runner.
    */
   private async handleQuotaCooldown(
     error: unknown,

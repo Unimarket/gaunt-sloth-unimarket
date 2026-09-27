@@ -1,6 +1,5 @@
 export * from '#src/constants.js';
 export * from '#src/core/types.js';
-export * from '#src/core/quotaCooldown.js';
 export { gthLeanAgentFactory } from '#src/core/gthLeanAgentFactory.js';
 export * from '#src/core/compaction.js';
 // EXT-161 — the preventive compaction threshold and the window resolution behind it, re-exported as

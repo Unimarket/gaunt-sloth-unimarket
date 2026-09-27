@@ -170,7 +170,12 @@ describe('CFG-84 — GthAgentRunner quota cooldown reactive seam', () => {
 
       const runner = await makeRunner(model, { streamOutput });
 
-      const turnPromise = runner.processMessages([new HumanMessage('Run tool and answer')]);
+      let settled = false;
+      const turnPromise = runner
+        .processMessages([new HumanMessage('Run tool and answer')])
+        .finally(() => {
+          settled = true;
+        });
 
       // Allow the turn to progress to the wait
       await vi.advanceTimersByTimeAsync(100);
@@ -184,10 +189,14 @@ describe('CFG-84 — GthAgentRunner quota cooldown reactive seam', () => {
       // Tool has run exactly once before the model threw 429
       expect(toolRunCount).toBe(1);
 
-      // Advance the remaining wait time (~51386 ms)
-      await vi.advanceTimersByTimeAsync(52_000);
+      // The wait is the parsed duration (51386 ms): still waiting just short of it, re-sent after.
+      await vi.advanceTimersByTimeAsync(51_200);
+      expect(settled).toBe(false);
+      expect(model.callCount).toBe(2);
+      await vi.advanceTimersByTimeAsync(200);
 
       const answer = await turnPromise;
+      expect(settled).toBe(true);
       expect(answer).toBe('Success answer from model.');
 
       // Tool ran EXACTLY ONCE across the whole turn: the checkpoint resumed without re-running the tool
@@ -200,6 +209,68 @@ describe('CFG-84 — GthAgentRunner quota cooldown reactive seam', () => {
       expect(runner.getTerminationReason()?.category).toBe('completed');
     });
   }
+
+  it('completes the turn after cooling down on the typed-event path (TUI and ACP), tool runs once', async () => {
+    const model = new ScriptedRunnerModel();
+    model.shouldCallToolFirst = true;
+    model.quotaFailuresRemaining = 1;
+
+    const runner = await makeRunner(model, { streamOutput: true });
+
+    let settled = false;
+    const drained = (async () => {
+      for await (const _ of runner.processMessagesWithEvents([
+        new HumanMessage('Run tool and answer'),
+      ])) {
+        // drain
+      }
+    })().finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(statusUpdate).toHaveBeenCalledWith(
+      StatusLevel.WARNING,
+      "The provider's quota is exhausted; waiting 51 seconds before retrying."
+    );
+    expect(toolRunCount).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(51_200);
+    expect(settled).toBe(false);
+    expect(model.callCount).toBe(2);
+    await vi.advanceTimersByTimeAsync(200);
+
+    await drained;
+    expect(toolRunCount).toBe(1);
+    expect(model.callCount).toBe(3);
+    expect(runner.getTerminationReason()?.category).toBe('completed');
+  });
+
+  it('terminates rate_limited on the typed-event path when the quota is per-day', async () => {
+    const model = new ScriptedRunnerModel();
+    model.quotaFailuresRemaining = 1;
+    model.quotaErrorFactory = () =>
+      makeQuotaError({ quotaId: 'GenerateContentPaidTierRequestsPerDay-PaidTier2', waitSec: 10 });
+
+    const runner = await makeRunner(model, { streamOutput: true });
+
+    let thrown: unknown;
+    try {
+      for await (const _ of runner.processMessagesWithEvents([new HumanMessage('Hello')])) {
+        // drain
+      }
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(statusUpdate).not.toHaveBeenCalledWith(
+      StatusLevel.WARNING,
+      expect.stringContaining("The provider's quota is exhausted; waiting")
+    );
+    expect(runner.getTerminationReason()?.category).toBe('rate_limited');
+    expect(model.callCount).toBe(1);
+  });
 
   it('terminates rate_limited when the wait exceeds the 90s bound', async () => {
     const model = new ScriptedRunnerModel();
