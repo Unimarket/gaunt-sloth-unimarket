@@ -133,6 +133,18 @@ describe('CFG-84 — readQuotaRetryHint reader', () => {
     expect(hint).toBeNull();
   });
 
+  it('returns null on a 403 even when its body says RESOURCE_EXHAUSTED and names a wait', () => {
+    // A balance cap does not recover by waiting, whatever the body's status string says.
+    const error = new Error(
+      'Your account balance has been exhausted. Please retry in 10s.'
+    ) as Error & { name: string; statusCode: number; data: unknown };
+    error.name = 'RequestError';
+    error.statusCode = 403;
+    error.data = { error: { code: 403, status: 'RESOURCE_EXHAUSTED', message: error.message } };
+
+    expect(readQuotaRetryHint(error)).toBeNull();
+  });
+
   it('returns null if prose wait in prose-only shape exceeds the 90s bound', () => {
     const error = new Error(
       'https://ai.google.dev/gemini-api/docs/rate-limits: Quota exceeded for metric: tokens. Please retry in 120s.'

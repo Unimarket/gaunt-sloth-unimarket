@@ -205,6 +205,13 @@ describe('CFG-84 — GthAgentRunner quota cooldown reactive seam', () => {
       // Model was called 3 times: call 1 (tool request), call 2 (429 throw), call 3 (answer after cooldown)
       expect(model.callCount).toBe(3);
 
+      // The re-send resumed the checkpoint instead of re-sending the user's message: the request
+      // after the cooldown carries the same user turn once and the tool result once.
+      const humanTurns = (request: BaseMessage[]) =>
+        request.filter((m) => HumanMessage.isInstance(m)).length;
+      expect(humanTurns(model.requests[2])).toBe(humanTurns(model.requests[0]));
+      expect(model.requests[2].filter((m) => ToolMessage.isInstance(m))).toHaveLength(1);
+
       // Turn completed with no terminal rate_limited reason
       expect(runner.getTerminationReason()?.category).toBe('completed');
     });
