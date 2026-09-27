@@ -173,6 +173,7 @@ export async function runAskCommand(
       {
         announceOutstandingWork: true,
         announceRunRecap: true,
+        announceResumeHint: true,
         ...(target ? { resume: target } : {}),
       }
     ));

@@ -24,6 +24,11 @@ import { ApprovalStopError, approvalStopRows } from '#src/core/shell/approvalSto
 import { displayTermination } from '#src/core/terminationNotice.js';
 import { displayRunEndReport, runEndReport, type GthRunRecap } from '#src/core/runRecap.js';
 import type { GthTerminationReason } from '#src/core/terminationReason.js';
+import {
+  announceResumeHint,
+  resumabilityOf,
+  type SingleShotResumability,
+} from '#src/runtime/resumeHint.js';
 
 /**
  * Result of a {@link runSingleShot} run: the pass/fail contract callers such as `ask`/`exec` have
@@ -72,9 +77,15 @@ export interface SingleShotResult extends GthRunStats {
   /**
    * GS2-106 — the conversation this run was recorded under, with its stable run id; absent when the
    * run was not recorded (history off, or the store could not be written). What a caller needs to
-   * tell a person how to come back to this run. Nothing prints it yet.
+   * tell a person how to come back to this run; the continue hint prints it for `ask` and `exec`.
    */
   conversation?: { conversationId: number; runId: string | null };
+  /**
+   * GS2-106 — whether this conversation can be continued, and if not why: the fact behind the
+   * continue hint, so a caller or a test reads the value rather than the line on stderr. Present
+   * only when the caller asked for the hint ({@link SingleShotOptions.announceResumeHint}).
+   */
+  resumability?: SingleShotResumability;
 }
 
 /** Options that qualify a {@link runSingleShot} run without changing how it behaves. */
@@ -150,6 +161,14 @@ export interface SingleShotOptions {
    * on. The value itself reaches a caller as `SingleShotResult.recap`.
    */
   announceRunRecap?: boolean;
+
+  /**
+   * GS2-106 — print the continue hint after the run (`gth ask --resume <run id> "…"`), subject to
+   * the user's `output.resumeHint` rung. Opt-in for the reason {@link announceOutstandingWork} is:
+   * `ask` and `exec` set it; the harnesses do not, and their cells could not be resumed anyway. The
+   * gate itself, and why, is documented in `runtime/resumeHint.ts`.
+   */
+  announceResumeHint?: boolean;
 
   /**
    * GS2-106 — the fan-out surface driving this run (`batch`, `eval`, `gth-batch`, `workflow`),
@@ -431,6 +450,13 @@ export async function runSingleShot(
     // was just written. A resumed run was bound before its turn and stays bound to that row.
     if (!resume) checkpointer.bindConversation?.(recorded?.conversationId);
 
+    // GS2-106 — whether this conversation can be continued, read NOW: after the record and the bind
+    // (so a write that failed mid-run has already cut the link) and before the close below.
+    let resumability: SingleShotResumability | undefined;
+    if (options?.announceResumeHint) {
+      resumability = await resumabilityOf(config, checkpointer, recorded ?? undefined);
+    }
+
     progressIndicator?.stop();
 
     if (config.writeOutputToFile === false) {
@@ -446,6 +472,14 @@ export async function runSingleShot(
         displayError(error instanceof Error ? error.message : String(error));
       }
     }
+    // The continue hint is the run's last line; see `runtime/resumeHint.ts` for its gate.
+    if (resumability) {
+      try {
+        announceResumeHint(config, command, recorded ?? undefined, resumability);
+      } catch {
+        /* fail-soft: a hint must never be what breaks a run */
+      }
+    }
 
     return {
       ok: succeeded,
@@ -457,6 +491,7 @@ export async function runSingleShot(
       ...(recorded
         ? { conversation: { conversationId: recorded.conversationId, runId: recorded.runId } }
         : {}),
+      ...(resumability ? { resumability } : {}),
     };
   } finally {
     // GS2-106 — release the checkpoint connection. After the record on the normal path, so the

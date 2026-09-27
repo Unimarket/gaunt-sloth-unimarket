@@ -248,6 +248,23 @@ function describeBadHeaderRung(issue: { input: unknown }): string {
 }
 
 /**
+ * The message a rejected `output.resumeHint` carries — the twin of `describeBadHeaderRung`, with its
+ * own noun, because the continue hint is not a run header. A boolean names the rung it meant.
+ */
+function describeBadResumeHintRung(issue: { input: unknown }): string {
+  if (typeof issue.input === 'boolean') {
+    return (
+      `not a boolean: it is one of ${OUTPUT_HEADER_RUNGS.join(', ')}. ` +
+      `Use "${issue.input ? 'compact' : 'none'}" instead of ${issue.input}.`
+    );
+  }
+  return (
+    `${JSON.stringify(issue.input)} is not a resume-hint rung — the rungs are ` +
+    `${OUTPUT_HEADER_RUNGS.join(', ')}.`
+  );
+}
+
+/**
  * [[EXT-178]] — the rungs of the end-of-run recap, the short paragraph a run prints when it ends
  * **without** an error.
  *
@@ -1399,16 +1416,21 @@ export const rawGthConfigSchema = z.looseObject({
   allowDirs: z.array(z.string()).optional(),
   askWriteMode: z.boolean().optional(),
   // GS2-93 — output surface controls. `header` is one of {@link OUTPUT_HEADER_RUNGS} and DEFAULTS
-  // to `debug` (omitted = the full preamble, unchanged). It grades what a NON-TUI text run
+  // to `compact` (omitted = one attribution line). It grades what a NON-TUI text run
   // (`--no-tui`, `ask`, `exec`, `eval`, `pr`, `review`, piped/CI) opens with: `debug` the full
   // Workdir/Model/Tools/Middleware block plus the `Press Escape or Q to interrupt` hint, `compact`
   // one attribution line instead, `none` nothing. The interactive TUI ignores it and always shows
   // the full header. Only that opening is graded — never model/tool output, errors, or
   // config-validation warnings. Defaulted at the read site, not in DEFAULT_CONFIG, to avoid
   // churning the effective-config snapshot (à la GS2-34 injectModelContext).
+  // GS2-106 — `resumeHint` grades the line `ask`/`exec` print on stderr after a recorded run,
+  // naming the command that continues it, on the same three rungs: `compact` (the read-site
+  // default) the one line, `debug` that line plus the integer id and the history file — or, when
+  // there is no hint, the reason why — and `none` nothing.
   output: z
     .object({
       header: z.enum(OUTPUT_HEADER_RUNGS, { error: describeBadHeaderRung }).optional(),
+      resumeHint: z.enum(OUTPUT_HEADER_RUNGS, { error: describeBadResumeHintRung }).optional(),
     })
     .optional(),
   // [[EXT-178]] — the end-of-run recap: a short paragraph on the ONE stop that is silent today,

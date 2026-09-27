@@ -644,9 +644,20 @@ export interface GthConfig {
    * graded — never model/tool output, errors, or config-validation warnings, and never the live
    * `Thinking…` indicator. Defaulted at the read site, not in {@link @gaunt-sloth/core!config/defaults.DEFAULT_CONFIG | DEFAULT_CONFIG}, to avoid
    * churning the effective-config snapshot.
+   *
+   * GS2-106 — `output.resumeHint` grades the line `gth ask` and `gth exec` print on stderr after a
+   * recorded run, naming the command that continues the conversation, on the same three rungs:
+   *
+   * - `compact` (the DEFAULT) — the one line, e.g. `gth ask --resume <run id> "…"`.
+   * - `debug` — that line plus the conversation's integer id and the history file it lives in; and
+   *   when a run gets no hint, a line saying why.
+   * - `none` — nothing.
+   *
+   * Batch, eval and workflow cells never print it, whatever the rung. Defaulted at the read site.
    */
   output?: {
     header?: GthOutputHeaderRung;
+    resumeHint?: GthOutputHeaderRung;
   };
   /**
    * [[EXT-178]] — the end-of-run recap: a short paragraph on the one stop that says nothing today.

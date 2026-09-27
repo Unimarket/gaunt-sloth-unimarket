@@ -277,6 +277,7 @@ export async function runExecCommand(
       {
         announceOutstandingWork: true,
         announceRunRecap: true,
+        announceResumeHint: true,
         ...(target ? { resume: target } : {}),
       }
     ));

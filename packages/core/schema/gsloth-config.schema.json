@@ -3180,6 +3180,14 @@
             "compact",
             "debug"
           ]
+        },
+        "resumeHint": {
+          "type": "string",
+          "enum": [
+            "none",
+            "compact",
+            "debug"
+          ]
         }
       }
     },

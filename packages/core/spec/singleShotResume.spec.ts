@@ -160,7 +160,7 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
       resolveMiddleware: async (m: unknown[] | undefined) => m ?? [],
     }) as unknown as AgentResolvers;
 
-  const config = (): GthConfig =>
+  const config = (over: Record<string, unknown> = {}): GthConfig =>
     ({
       llm: new RecallModel(),
       contentProvider: 'file',
@@ -179,16 +179,22 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
       approvals: 'bypass',
       modelDisplayName: 'scripted-recall',
       history: { dbPath },
+      ...over,
     }) as unknown as GthConfig;
 
   type Options = Parameters<typeof import('#src/runtime/singleShot.js').runSingleShot>[7];
-  const run = async (prompt: string, command: 'ask' | 'exec' = 'ask', options?: Options) => {
+  const run = async (
+    prompt: string,
+    command: 'ask' | 'exec' = 'ask',
+    options?: Options,
+    over?: Record<string, unknown>
+  ) => {
     const { runSingleShot } = await import('#src/runtime/singleShot.js');
     return runSingleShot(
       'SINGLE-SHOT',
       '',
       prompt,
-      config(),
+      config(over),
       resolvers(),
       command,
       undefined,
@@ -320,6 +326,205 @@ describe('GS2-106 — a single-shot run resumes a recorded conversation', () => 
     },
     REAL_AGENT_TIMEOUT_MS
   );
+
+  describe('the continue hint (output.resumeHint)', () => {
+    const HINT = { announceResumeHint: true } as const;
+    const notices = () =>
+      vi.mocked(consoleUtils.displayNotice).mock.calls.map(([title, lines]) => ({
+        title,
+        lines: [...lines],
+      }));
+    const hintsOf = () => notices().filter((n) => n.title.startsWith('To continue'));
+    const noHintsOf = () => notices().filter((n) => n.title.startsWith('No resume hint'));
+
+    it(
+      'ACCEPTANCE: omitted means compact — one line naming the run id, and that id resumes the conversation',
+      async () => {
+        const first = await run('look up the code', 'ask', HINT);
+        const { conversationId, runId } = first.conversation!;
+        expect(runId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(first.resumability).toEqual({ resumable: true });
+        expect(hintsOf()).toEqual([
+          {
+            title: `To continue this conversation: gth ask --resume ${runId} "…"`,
+            lines: [],
+          },
+        ]);
+        vi.clearAllMocks();
+
+        // The id the hint named, fed back: the same conversation, and it prints the SAME run id.
+        const resumed = await run(FOLLOW_UP, 'ask', {
+          ...HINT,
+          resume: resumeOf(conversationId),
+        });
+        expect(resumed.answer).toBe(`The code was ${SECRET}`);
+        expect(resumed.conversation).toEqual({ conversationId, runId });
+        expect(hintsOf().map((n) => n.title)).toEqual([
+          `To continue this conversation: gth ask --resume ${runId} "…"`,
+        ]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'exec names exec and -m',
+      async () => {
+        const first = await run('look up the code', 'exec', HINT);
+        expect(hintsOf().map((n) => n.title)).toEqual([
+          `To continue this conversation: gth exec --resume ${first.conversation!.runId} -m "…"`,
+        ]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'compact, set explicitly, is the same one line',
+      async () => {
+        const first = await run('look up the code', 'ask', HINT, {
+          output: { resumeHint: 'compact' },
+        });
+        expect(hintsOf()).toEqual([
+          {
+            title: `To continue this conversation: gth ask --resume ${first.conversation!.runId} "…"`,
+            lines: [],
+          },
+        ]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'none prints nothing, though the run is resumable',
+      async () => {
+        const first = await run('look up the code', 'ask', HINT, {
+          output: { resumeHint: 'none' },
+        });
+        expect(first.resumability).toEqual({ resumable: true });
+        expect(notices()).toEqual([]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'debug adds the integer id and the history file',
+      async () => {
+        const first = await run('look up the code', 'ask', HINT, {
+          output: { resumeHint: 'debug' },
+        });
+        const { conversationId, runId } = first.conversation!;
+        expect(hintsOf()).toEqual([
+          {
+            title: `To continue this conversation: gth ask --resume ${runId} "…"`,
+            lines: [`Conversation #${conversationId}.`, `History file: ${dbPath}`],
+          },
+        ]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'ACCEPTANCE: with history off the run prints no hint; debug says it was not recorded',
+      async () => {
+        const off = await run('look up the code', 'ask', HINT, {
+          history: { enabled: false, dbPath },
+        });
+        expect(off.ok).toBe(true);
+        expect(off.conversation).toBeUndefined();
+        expect(off.resumability).toEqual({ resumable: false, reason: 'history-off' });
+        expect(notices()).toEqual([]);
+        vi.clearAllMocks();
+
+        await run('look up the code', 'ask', HINT, {
+          history: { enabled: false, dbPath },
+          output: { resumeHint: 'debug' },
+        });
+        expect(hintsOf()).toEqual([]);
+        expect(noHintsOf()).toHaveLength(1);
+        expect(noHintsOf()[0].title).toContain('history is off');
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'a caller that did not ask — every harness — prints nothing and gets no resumability, whatever the rung',
+      async () => {
+        const cell = await run(
+          'look up the code',
+          'exec',
+          { displayCommand: 'batch', origin: 'batch' },
+          { output: { resumeHint: 'debug' } }
+        );
+        expect(cell.conversation).toBeDefined();
+        expect(cell.resumability).toBeUndefined();
+        expect(notices()).toEqual([]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'ACCEPTANCE (degrade): a resumed run whose link was cut prints no hint under compact, and the reason under debug',
+      async () => {
+        const first = await run('look up the code');
+        const { conversationId } = first.conversation!;
+        vi.clearAllMocks();
+
+        faults.failWritesAfterFirst = true;
+        const cut = await run(FOLLOW_UP, 'ask', { ...HINT, resume: resumeOf(conversationId) });
+        expect(cut.answer).toBe(`The code was ${SECRET}`);
+        expect(cut.resumability).toEqual({ resumable: false, reason: 'link-cut' });
+        expect(notices()).toEqual([]);
+
+        // The same failure under debug, on a fresh conversation (the first one is now unlinked).
+        const second = await run('look up the code');
+        vi.clearAllMocks();
+        await run(
+          FOLLOW_UP,
+          'ask',
+          { ...HINT, resume: resumeOf(second.conversation!.conversationId) },
+          { output: { resumeHint: 'debug' } }
+        );
+        expect(hintsOf()).toEqual([]);
+        expect(noHintsOf()).toHaveLength(1);
+        expect(noHintsOf()[0].title).toContain('a checkpoint write failed during the run');
+        expect(noHintsOf()[0].lines).toEqual([
+          `Conversation #${second.conversation!.conversationId}.`,
+          `History file: ${dbPath}`,
+        ]);
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+
+    it(
+      'a row that predates run ids falls back to its integer, and debug says why — no run id is minted',
+      async () => {
+        const first = await run('look up the code');
+        const { conversationId } = first.conversation!;
+        const db = new DatabaseSync(dbPath);
+        db.prepare(`UPDATE conversations SET run_id = NULL WHERE id = ?`).run(conversationId);
+        db.close();
+
+        await run(FOLLOW_UP, 'ask', { ...HINT, resume: resumeOf(conversationId) });
+        expect(hintsOf().map((n) => n.title)).toEqual([
+          `To continue this conversation: gth ask --resume ${conversationId} "…"`,
+        ]);
+        vi.clearAllMocks();
+
+        await run(
+          'and again',
+          'ask',
+          { ...HINT, resume: resumeOf(conversationId) },
+          { output: { resumeHint: 'debug' } }
+        );
+        const [hint] = hintsOf();
+        expect(hint.title).toBe(
+          `To continue this conversation: gth ask --resume ${conversationId} "…"`
+        );
+        expect(hint.lines[2]).toContain('predates run ids');
+        expect(row(conversationId).run_id).toBeNull();
+      },
+      REAL_AGENT_TIMEOUT_MS
+    );
+  });
 
   it(
     'a fan-out caller’s origin is recorded on the conversation; a direct run records none',

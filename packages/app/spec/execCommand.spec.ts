@@ -133,6 +133,7 @@ describe('execCommand', () => {
     expect(runSingleShot.mock.calls[0][7]).toEqual({
       announceOutstandingWork: true,
       announceRunRecap: true,
+      announceResumeHint: true,
     });
     // B5: exec defaults to the lean backend; the resolved factory is threaded through.
     expect(resolveAgentFactoryMock.resolveAgentFactory).toHaveBeenCalledWith(

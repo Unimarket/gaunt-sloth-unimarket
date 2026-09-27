@@ -144,7 +144,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
     // ask asks for the lean backend, the only one shipped; agent.backend names no other.
     expect(resolveAgentFactoryMock.resolveAgentFactory).toHaveBeenCalledWith(mockConfig, 'lean');
@@ -186,7 +186,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
   });
 
@@ -210,7 +210,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
   });
 
@@ -235,7 +235,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
   });
 
@@ -256,7 +256,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
   });
 
@@ -297,7 +297,7 @@ describe('askCommand', () => {
       expect.any(Object),
       'ask',
       resolvedFactory,
-      { announceOutstandingWork: true, announceRunRecap: true }
+      { announceOutstandingWork: true, announceRunRecap: true, announceResumeHint: true }
     );
 
     // Specifically verify the writeOutputToFile parameter was passed through

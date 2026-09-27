@@ -150,6 +150,37 @@ describe('gth --resume in front of a subcommand (real CLI definition)', () => {
       expect(list.output).not.toContain('#2');
     });
 
+    // GS2-106 — the continue hint, through the built CLI: on stderr only, naming the run id, and the
+    // command it names, pasted with the placeholder filled in, continues the same conversation.
+    it('ask prints the continue hint on stderr only, and pasting it resumes the conversation', () => {
+      const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
+      delete env.INIT_CWD;
+      const spawn = (args: string[]) =>
+        spawnSync('node', [cliEntry, '--nopipe', '-c', configPath, ...args], {
+          encoding: 'utf8',
+          cwd: projectDir,
+          env,
+        });
+
+      const first = spawn(['ask', 'hello there']);
+      expect(first.status, first.stderr).toBe(0);
+      const hint = /To continue this conversation: (gth ask --resume ([0-9a-f-]{36}) "…")/.exec(
+        first.stderr
+      );
+      expect(hint, first.stderr).not.toBeNull();
+      expect(first.stdout).not.toContain('To continue this conversation');
+
+      const [, , runId] = hint!;
+      const again = spawn(['ask', '--resume', runId, 'a follow-up']);
+      expect(again.status, again.stderr).toBe(0);
+      expect(again.stdout).toContain(FAKE_ANSWER);
+      // The same run id again, and still one conversation.
+      expect(again.stderr).toContain(`gth ask --resume ${runId} "…"`);
+      const list = spawn(['history', 'list']);
+      expect(list.stdout).toContain('(2 turns)');
+      expect(list.stdout).not.toContain('#2');
+    });
+
     it('an id that is not on record fails by name via ask, runs nothing, and exits 1', () => {
       const { status, output } = runCli(['--resume', '9', '-c', configPath, 'ask', 'hello']);
       expect(status, output).toBe(1);
