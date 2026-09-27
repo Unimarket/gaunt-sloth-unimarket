@@ -182,7 +182,7 @@ export function openIndexDb(
 
 /** What {@link rebuildHistoryIndex} put back. */
 export interface IndexRebuildSummary {
-  /** Thread files read. */
+  /** Files under `threads/` read: thread files and conversation record files alike. */
   threadFiles: number;
   /** Conversations restored into the index. */
   conversations: number;
@@ -199,8 +199,8 @@ export interface IndexRebuildSummary {
  * file is updated to match, so the files stay the record. Two records of the same run id are one
  * conversation: the first is kept.
  *
- * An index row whose file is gone is not carried over, which is the rule that deleting one thread
- * file loses only that thread. The rebuilt index is written beside the old one and renamed over it,
+ * An index row whose record file is gone is not carried over, which is the rule that deleting one
+ * file loses only what it held. The rebuilt index is written beside the old one and renamed over it,
  * so a failure part-way leaves the old index as it was. Throws on failure; the callers report it.
  */
 export function rebuildHistoryIndex(storePath: string): IndexRebuildSummary {

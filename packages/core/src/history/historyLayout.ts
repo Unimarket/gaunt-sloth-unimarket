@@ -153,7 +153,7 @@ const PLAIN_THREAD_ID = /^[0-9a-f][0-9a-f-]{0,79}$/;
 const HASHED_PREFIX = 'h-';
 
 /**
- * The file name holding `threadId`. A plain id ({@link PLAIN_THREAD_ID}) is used as it stands;
+ * The file name holding `threadId`. A plain id (lowercase hex digits and dashes) is used as it stands;
  * anything else is named by its SHA-256, and the id is read back from inside the file.
  */
 export function threadFileName(threadId: string): string {

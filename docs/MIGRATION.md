@@ -728,8 +728,9 @@ stored as-is and not redacted, because a session that came back with its evidenc
 longer be the session you left. If your work reads material you would rather not have sitting in a
 local database, use the switch below to turn recording off.
 
-**It stays on your machine.** Nothing here touches the network, there is no telemetry, and the file
-is a plain SQLite database under your home directory that you can inspect or delete at any time.
+**It stays on your machine.** Nothing here touches the network, there is no telemetry, and the store
+is a directory of plain SQLite databases under your home directory that you can inspect or delete
+at any time.
 
 To turn it off — no recording, no stored conversation state, and runs behave exactly as they did:
 
@@ -741,7 +742,7 @@ To turn it off — no recording, no stored conversation state, and runs behave e
 }
 ```
 
-To keep it on but put the file elsewhere, set `history.dbPath`. A config that already sets
+To keep it on but put the store elsewhere, set `history.dbPath`. A config that already sets
 `history.enabled` either way is unaffected; only configs that never mentioned the key change
 behaviour.
 

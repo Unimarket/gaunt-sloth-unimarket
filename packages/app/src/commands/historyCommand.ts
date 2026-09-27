@@ -316,13 +316,13 @@ export function historyCommand(
       }
     );
 
-  // GS2-121 — the index is a cache of the thread files, and this rebuilds it from them alone: what
-  // a person runs when `index.db` is damaged or was deleted, or when thread files were copied in
+  // GS2-121 — the index is a cache of the files under `threads/`, and this rebuilds it from them
+  // alone: what a person runs when `index.db` is damaged or was deleted, or when files were copied in
   // from elsewhere. A missing index is rebuilt on its own at the next open; this also replaces one
   // that is there. Conversations keep their ids.
   history
     .command('rebuild')
-    .description('Rebuild the history index from the per-conversation files')
+    .description("Rebuild the history index from the store's thread and conversation files")
     .option('--db <path>', DB_OPTION_HELP)
     .addHelpText(
       'after',
@@ -339,7 +339,7 @@ export function historyCommand(
         return;
       }
       display(
-        `Rebuilt the index from ${summary.threadFiles} thread ` +
+        `Rebuilt the index from ${summary.threadFiles} ` +
           `${summary.threadFiles === 1 ? 'file' : 'files'}: ${summary.conversations} ` +
           `${summary.conversations === 1 ? 'conversation' : 'conversations'}, ${summary.turns} ` +
           `${summary.turns === 1 ? 'turn' : 'turns'}.`

@@ -9,12 +9,13 @@
  * prune removes nothing until `--yes`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import {
   checkpointThreadIds,
   countRows,
+  indexPath,
   storeSizeOnDisk,
 } from '../../core/spec/fixtures/historyStoreFiles.mjs';
 import { Command } from 'commander';
@@ -398,6 +399,33 @@ describe('gth history prune (GS2-107)', () => {
       expect(said).toContain('1 thread with no checkpoint');
       expect(said).toContain('gth history prune');
       expect(said).not.toContain('0 checkpoints');
+    });
+  });
+
+  /** GS2-121 — `gth history rebuild`, the command form of "the index is a cache of the files". */
+  describe('gth history rebuild', () => {
+    it('rebuilds a lost index from the files, and the conversations come back by their numbers', async () => {
+      const oldId = await seed({ threadId: 't-old', ageDays: 90 });
+      const keptId = await seed({ threadId: 't-recent', ageDays: 2 });
+      rmSync(indexPath(dbPath));
+
+      await run('rebuild', '--db', dbPath);
+      expect(output()).toContain('2 conversations, 2 turns');
+      expect(output()).toContain('History rebuild complete');
+      expect(existsSync(indexPath(dbPath))).toBe(true);
+
+      const { openHistoryStore } = await import('@gaunt-sloth/core/history/historyStore.js');
+      const store = openHistoryStore(dbPath)!;
+      expect(store.getConversationThreadId(oldId!)).toBe('t-old');
+      expect(store.getConversationThreadId(keptId!)).toBe('t-recent');
+      store.close();
+    });
+
+    it('says there is no history rather than creating a store', async () => {
+      const absent = resolve(dir, 'nothing-here.db');
+      await run('rebuild', '--db', absent);
+      expect(output()).toContain('No session history found');
+      expect(existsSync(absent)).toBe(false);
     });
   });
 });

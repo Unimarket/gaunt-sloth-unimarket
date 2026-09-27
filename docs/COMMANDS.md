@@ -1515,9 +1515,12 @@ gth history search <query...> [--limit <n>] [--db <path>]
 gth history show <id> [--db <path>]
 gth history resume <id> [message]
 gth history prune [--older-than <days>] [--keep-last <n>] [--yes] [--db <path>]
+gth history rebuild [--db <path>]
 ```
 
-Recording is **on by default and local only** — nothing here touches the network. Set `history.enabled: false` in your config to turn it off; with no store present these commands report that there is no history yet rather than creating one. The store defaults to `~/.gsloth/history.db` (overridable via the `history.dbPath` config key or the `--db` flag), and interactive `chat`/`code` sessions and single-shot runs (`ask`, `exec`, and the cells of `batch`, `eval` and `workflow`) keep their conversation state in the same file, which is what `history resume` picks up — see [Resuming a conversation](#resuming-a-conversation).
+Recording is **on by default and local only** — nothing here touches the network. Set `history.enabled: false` in your config to turn it off; with no store present these commands report that there is no history yet rather than creating one. The store is `~/.gsloth/history.db` unless your config's `history.dbPath` names another, and the `--db` flag overrides both. Interactive `chat`/`code` sessions and single-shot runs (`ask`, `exec`, and the cells of `batch`, `eval` and `workflow`) keep their conversation state in the same store, which is what `history resume` picks up — see [Resuming a conversation](#resuming-a-conversation).
+
+The store is a directory, despite its name. It holds `index.db`, a small database of conversations and turns that the listing and search read, and `threads/`, with one SQLite file per conversation thread holding that thread's saved state and one small file per conversation holding its turns. A store written by 2.0.0 is a single file at the same path; the first command that opens it splits it into a directory, once, without asking. Deleting one file under `threads/` loses only what that file held, and `gth history rebuild` rebuilds `index.db` from the files if it is lost or damaged.
 
 ### Subcommands
 - `history list` - List the most recent conversations, grouped with a turn count and timespan. Each shows its number and its run id; a conversation recorded before run ids existed shows a dashed placeholder and is named by its number.
@@ -1525,6 +1528,7 @@ Recording is **on by default and local only** — nothing here touches the netwo
 - `history show` - Print a whole conversation thread, all turns in order. Takes the number or the run id; anything else, or an id no conversation has, is refused by name.
 - `history resume` - Continue a recorded conversation as the command it was recorded under. A `chat` or `code` conversation opens an interactive session with its approvals in force again, and an optional `[message]` becomes its first message. An `ask` or `exec` conversation runs one more turn, which needs the message — as the argument or on stdin — and restores no approvals. Takes the number or the run id. A conversation nothing can resume (see [Resuming a conversation](#resuming-a-conversation)) is refused with exit status 1; `history show` still prints it. Takes no `--db`: the run reads the store its own config names.
 - `history prune` - Remove stored conversation state and give the disk space back. See [What the store keeps, and what reclaims it](#what-the-store-keeps-and-what-reclaims-it).
+- `history rebuild` - Rebuild the store's `index.db` from the files under `threads/`. Conversation numbers and run ids stay as they were. Run it if the index is lost or damaged; a missing index is also rebuilt on its own the next time the store is opened.
 
 ### What the store keeps, and what reclaims it
 
@@ -1545,7 +1549,7 @@ Pruning takes whole conversations, never part of one, and it **keeps the transcr
 - `<id>` - (`history show` / `history resume`) Conversation id, as printed by `history list` / `history search`.
 
 ### Options
-- `--db <path>` - (`history list` / `history search` / `history show` / `history prune`) Path to the history DB (defaults to `~/.gsloth/history.db`).
+- `--db <path>` - (`history list` / `history search` / `history show` / `history prune` / `history rebuild`) Path to the history store (defaults to `history.dbPath` from your config, then `~/.gsloth/history.db`).
 - `--limit <n>` - (`history list` / `history search`) Maximum results (default: `20`).
 - `--older-than <days>` - (`history prune`) Prune conversations with no activity for this many days.
 - `--keep-last <n>` - (`history prune`) Keep the `n` most recently active conversations and prune the rest.
@@ -1573,6 +1577,9 @@ gth history prune --older-than 30
 
 # Keep the 20 most recent conversations resumable and reclaim the rest
 gth history prune --keep-last 20 --yes
+
+# Rebuild the store's index from its files
+gth history rebuild
 ```
 
 ## insights
@@ -1586,14 +1593,14 @@ gth insights [--db <path>]
 Read-only analytics over the same [`history`](#history) store — token and cost totals, a top-tool tally, a per-command breakdown, and the size of the conversation store: how many bytes it holds, across how many threads, how much of that nothing can resume, and which threads are the largest (see [What the store keeps, and what reclaims it](#what-the-store-keeps-and-what-reclaims-it)). Local only: nothing leaves the machine, and with no store present it reports that there is no history yet rather than creating one. Recording is on by default; `history.enabled: false` in your config turns it off.
 
 ### Options
-- `--db <path>` - Path to the history DB (defaults to `~/.gsloth/history.db`).
+- `--db <path>` - Path to the history store (defaults to `history.dbPath` from your config, then `~/.gsloth/history.db`).
 
 ### Examples
 ```bash
 # Show local usage analytics
 gth insights
 
-# Point at a specific history DB
+# Point at a specific history store
 gth insights --db ./project-history.db
 ```
 
