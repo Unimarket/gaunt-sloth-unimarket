@@ -409,7 +409,9 @@ export interface OutOfProjectCwd {
  * An out-of-project call CAN end in a halt, so it takes the same branch here:
  * - the allow-tripwire halt in `GthAgentRunner.decideToolApprovalInner` is unreachable for it, since
  *   that path needs `allowlistApplies`, which is false outside the project;
- * - the rater's own halt is reachable at `assisted` and `auto`: the out-of-project rewrite to
+ * - the rater's own halt is reachable at `assisted` and `auto`: `mapVerdictToAction` (`rater.ts`)
+ *   returns `halt` for an `attack` outcome at either rated rung, with no rung condition, and the
+ *   out-of-project rewrite to
  *   `escalate` applies only when `action !== 'halt'`, so an `attack` rating still reaches
  *   `haltOrRunAnyway`, and with no banner wired that throws {@link AttackHaltError}.
  * Its in-project recovery ("declare it in approvals.allow … it never reaches a halt") is false for

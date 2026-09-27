@@ -773,6 +773,25 @@ describe('[[EXT-201]] the stop for an out-of-project working directory', () => {
       },
       { kind: 'own', text: BYPASS },
     ]);
+    // The RENDERED rows, as a plain surface paints them: labels on their own rows, both
+    // directories inside the gutter, no allow entry anywhere.
+    expect(approvalStopRows(error.parts, { columns: 100 })).toEqual([
+      'Approval required, but this session has no one to ask.',
+      '  Command:',
+      '  1 │ cat marker.txt',
+      '  Rating:',
+      '  1 │ safe',
+      '  Reason:',
+      '  1 │ Read-only inspection of a local text file.',
+      CAUSE,
+      '  Working directory:',
+      '  1 │ /tmp/elsewhere/outside',
+      '  Project directory:',
+      '  1 │ /tmp/elsewhere/project',
+      "To bring this command back under the project's own rules, approvals.allow included, " +
+        'start the session from a directory that contains its working directory.',
+      BYPASS,
+    ]);
     expect(error.message).not.toContain(ENTRY);
     expect(error.message).not.toContain('"pattern": "npm test"');
     expect(error.allowEntry, 'the field is withheld with the message').toBeUndefined();
