@@ -192,6 +192,27 @@ import {
 const CRASH_TRANSCRIPT_TAIL_MESSAGES = 8;
 
 /**
+ * The most tool-approval resume rounds one turn's drain loop runs before it gives up, on both the
+ * string and the typed-event paths. Each gated tool call the model makes is one round.
+ */
+const MAX_INTERRUPT_DRAIN_ROUNDS = 100;
+
+/**
+ * [[EXT-203]] — the error a string-path turn ends with when its approval drain ran out of rounds
+ * and the turn produced no answer text. The drain loop has already noted the same reason, so
+ * first-write-wins keeps it; it is attached here as well for a caller that only sees the error.
+ */
+function drainExhaustedError(): Error {
+  return attachTerminationReason(
+    new Error(
+      `Stopped after ${MAX_INTERRUPT_DRAIN_ROUNDS} rounds of tool approvals in one turn, ` +
+        'before the model gave an answer.'
+    ),
+    terminationReason('runner.interrupt-guard-exhausted', 'control', 'interrupt_drain_guard')
+  );
+}
+
+/**
  * [[EXT-29]] §5.1 — the `justification` argument of a `run_shell_command` call, when the model
  * supplied a usable one.
  *
@@ -1338,12 +1359,15 @@ export class GthAgentRunner {
         debugLog('Using streaming mode');
         const stream = await this.agent.stream(messages, this.runConfig);
         let result = '';
+        let drainExhausted = false;
         try {
           result = await this.drainTextStream(stream);
           // A run may suspend on one or more tool-approval interrupts (run_shell_command).
           // Resolve them in a loop: each resume can itself suspend again on the next gated
           // tool call, so keep going until the graph completes with no pending interrupts.
-          result += await this.resolveToolInterrupts();
+          const drain = await this.resolveToolInterrupts();
+          result += drain.text;
+          drainExhausted = drain.exhausted;
         } catch (streamError) {
           // CFG-27 — an approvals STOP is not a stream failure: it is the gate deliberately
           // ending the run, and its message IS the explanation the spec requires it to carry.
@@ -1388,6 +1412,41 @@ export class GthAgentRunner {
         // langchain stops streaming jumpTo-injected messages, the budget notice would drain empty
         // and hit this fallback; GthAbstractAgentTerminalNotice.spec pins the current behaviour.)
         if (result.trim().length === 0) {
+          // [[EXT-203]] — **the fallback below must never re-send a thread that ends with the
+          // model's own turn.** Measured with a scripted model on a real graph, on both a
+          // MemorySaver and the durable sqlite saver, and identically on v2.0.0: by the time the
+          // stream has drained, the model's reply is already in the checkpointed thread, and
+          // re-sending `messages` does NOT append a new user turn. The messages reducer stamped an
+          // id onto that same `HumanMessage` object on the first pass, so the second pass
+          // replaces it in place and the model is called on `…, human, ai, tool, ai`. Gemini
+          // rejects that outright ("Requests ending with a model turn are not supported", a 400);
+          // Anthropic reads a trailing assistant turn as a prefill to continue, silently. So this
+          // was never a retry of the turn, only a second call on a history no provider should be
+          // sent.
+          //
+          // Two ways in:
+          // - the approval drain ran out of rounds with the graph still suspended, so the thread
+          //   ends with the tool-calling AI message it is suspended on. Both of the CFG-84 lane's
+          //   live `gth exec` runs on Gemini ended this way: the turn had ended on the bound, and
+          //   re-invoking only added a provider 400 on top of it;
+          // - the model answered a tool result with no answer text (a thought-only reply, for
+          //   one), so the thread ends with that empty AI message.
+          //
+          // The fallback is kept for what it can still do: an agent that exposes no thread state,
+          // or a thread whose last message is not the model's. It is not replaced by a nudge such
+          // as a repeated user message, because injecting input the user never sent is the steer
+          // this codebase refuses everywhere else.
+          if (drainExhausted) throw drainExhaustedError();
+          if (await this.threadEndsWithModelTurn()) {
+            const reason = terminationReason('runner.empty-stream', 'control', 'empty_response');
+            this.noteTermination(reason);
+            throw attachTerminationReason(
+              new Error(
+                'Model returned an empty response after tool execution. Try again or switch to a more stable model.'
+              ),
+              reason
+            );
+          }
           debugLog('Stream produced empty response, retrying once with non-streaming invoke.');
           const fallback = await this.agent.invoke(messages, this.runConfig);
           debugLog(`Fallback non-stream response length: ${fallback.length}`);
@@ -1435,9 +1494,13 @@ export class GthAgentRunner {
         // approved command's output reach the caller on `streamOutput: false`; without it the turn
         // died with the misleading empty-response error, so the check may only see a genuinely
         // empty turn.
-        result += await this.resolveToolInterrupts();
+        const drain = await this.resolveToolInterrupts();
+        result += drain.text;
         debugLog(`Non-stream response length: ${result.length}`);
         if (result.trim().length === 0) {
+          // [[EXT-203]] — the streaming arm's twin: a drain that ran out of rounds ended the turn,
+          // and "the model returned an empty response" would misstate why.
+          if (drain.exhausted) throw drainExhaustedError();
           // [[EXT-159]] — the non-streaming path has no retry to spend, so an empty turn is
           // terminal here at once.
           const reason = terminationReason('runner.empty-invoke', 'control', 'empty_response');
@@ -1531,19 +1594,22 @@ export class GthAgentRunner {
    * decisions are then sent back via the agent's `streamResume` as a LangChain HITL resume
    * (`{ decisions }`). Because a resumed run can suspend again on the next gated tool call, this
    * loops until the graph completes with no pending interrupts. Returns the concatenated text
-   * streamed across all resume turns (empty when nothing was resumed).
+   * streamed across all resume turns (empty when nothing was resumed), and whether the loop ran out
+   * of rounds with the graph still suspended ([[EXT-203]]: the caller must not re-invoke then).
    *
-   * No-ops (returns '') when the agent does not support interrupts (`getPendingToolInterrupts`/
-   * `streamResume` absent) — that is the only exemption. As of EXT-52 the shipped agent gates
+   * No-ops (returns no text, not exhausted) when the agent does not support interrupts
+   * (`getPendingToolInterrupts`/`streamResume` absent) — that is the only exemption. As of EXT-52 the shipped agent gates
    * `run_shell_command` and exposes the interrupt surface, so the lean agent is exactly the agent
    * this loop serves; only an agent implementation without those methods (e.g. a test double)
    * skips it.
    */
-  private async resolveToolInterrupts(): Promise<string> {
+  private async resolveToolInterrupts(): Promise<{ text: string; exhausted: boolean }> {
     const agent = this.agent;
     const runConfig = this.runConfig;
-    if (!agent || !runConfig) return '';
-    if (!agent.getPendingToolInterrupts || !agent.streamResume) return '';
+    if (!agent || !runConfig) return { text: '', exhausted: false };
+    if (!agent.getPendingToolInterrupts || !agent.streamResume) {
+      return { text: '', exhausted: false };
+    }
 
     let resumedText = '';
     // [[EXT-159]] — which way the loop left decides what ended the turn, and only the loop knows.
@@ -1551,7 +1617,7 @@ export class GthAgentRunner {
     // returned string either way, so a caller cannot tell them apart.
     let drained = false;
     // Bound the loop defensively so a misbehaving graph that re-suspends forever cannot spin.
-    for (let guard = 0; guard < 100; guard++) {
+    for (let guard = 0; guard < MAX_INTERRUPT_DRAIN_ROUNDS; guard++) {
       const pending = await agent.getPendingToolInterrupts(runConfig);
       if (pending.length === 0) {
         drained = true;
@@ -1576,7 +1642,29 @@ export class GthAgentRunner {
         terminationReason('runner.interrupt-guard-exhausted', 'control', 'interrupt_drain_guard')
       );
     }
-    return resumedText;
+    return { text: resumedText, exhausted: !drained };
+  }
+
+  /**
+   * [[EXT-203]] — does the thread this turn runs on end with the model's own turn?
+   *
+   * Asked before the empty-stream fallback re-invokes, because re-invoking such a thread sends the
+   * provider a history whose last message is the model's (see the fallback's comment in
+   * `runTurn`). Answers `false` when it cannot tell — an agent that exposes no thread state, or a
+   * read that fails — which leaves the fallback exactly as it was for those agents.
+   */
+  private async threadEndsWithModelTurn(): Promise<boolean> {
+    const agent = this.agent;
+    const runConfig = this.runConfig;
+    if (!agent?.getConversationMessages || !runConfig) return false;
+    try {
+      const messages = await agent.getConversationMessages(runConfig);
+      const last = messages[messages.length - 1];
+      return typeof last?.getType === 'function' && last.getType() === 'ai';
+    } catch (e) {
+      debugLogError('threadEndsWithModelTurn', e);
+      return false;
+    }
   }
 
   /**
@@ -3680,7 +3768,7 @@ export class GthAgentRunner {
     // the user, not by this bound.
     let drained = false;
     // Bound the loop defensively so a misbehaving graph that re-suspends forever cannot spin.
-    for (let guard = 0; guard < 100; guard++) {
+    for (let guard = 0; guard < MAX_INTERRUPT_DRAIN_ROUNDS; guard++) {
       if (signal?.aborted) return;
       const pending = await agent.getPendingToolInterrupts(runConfig);
       if (pending.length === 0) {
