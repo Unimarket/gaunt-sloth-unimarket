@@ -162,6 +162,14 @@
       "kind": "number"
     },
     {
+      "name": "MAX_QUOTA_COOLDOWNS_PER_TURN",
+      "kind": "number"
+    },
+    {
+      "name": "MAX_QUOTA_COOLDOWN_MS",
+      "kind": "number"
+    },
+    {
       "name": "MCP_TOOL_NAME_PREFIX",
       "kind": "string"
     },
@@ -502,6 +510,10 @@
       "kind": "function"
     },
     {
+      "name": "isWithinQuotaCooldownBound",
+      "kind": "function"
+    },
+    {
       "name": "isWriteFileToolRegistered",
       "kind": "function"
     },
@@ -562,7 +574,15 @@
       "kind": "function"
     },
     {
+      "name": "quotaCooldownWaitMessage",
+      "kind": "function"
+    },
+    {
       "name": "readConversationGrantsSafe",
+      "kind": "function"
+    },
+    {
+      "name": "readQuotaRetryHint",
       "kind": "function"
     },
     {

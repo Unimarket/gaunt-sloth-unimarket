@@ -27,8 +27,6 @@
  *   retries; a balance cap does not recover by waiting.
  */
 
-import type { StatusLevel } from '#src/core/types.js';
-
 /** Maximum wait duration in milliseconds for a quota cooldown (90 seconds). */
 export const MAX_QUOTA_COOLDOWN_MS = 90_000;
 
@@ -46,7 +44,7 @@ export interface QuotaRetryHint {
 /**
  * Format the user-visible notification line for a quota cooldown wait.
  *
- * Emitted to `statusUpdate` at {@link StatusLevel.WARNING} so both plain-CLI and Ink TUI
+ * Emitted to `statusUpdate` at `StatusLevel.WARNING` so both plain-CLI and Ink TUI
  * surfaces present the wait visibly to the user rather than going silent.
  */
 export function quotaCooldownWaitMessage(waitMs: number): string {
@@ -56,7 +54,12 @@ export function quotaCooldownWaitMessage(waitMs: number): string {
 
 /** Check if a parsed wait duration is within the accepted cooldown bound (0 < waitMs <= 90s). */
 export function isWithinQuotaCooldownBound(waitMs: number): boolean {
-  return typeof waitMs === 'number' && Number.isFinite(waitMs) && waitMs > 0 && waitMs <= MAX_QUOTA_COOLDOWN_MS;
+  return (
+    typeof waitMs === 'number' &&
+    Number.isFinite(waitMs) &&
+    waitMs > 0 &&
+    waitMs <= MAX_QUOTA_COOLDOWN_MS
+  );
 }
 
 /** Unroll any nested error causes to find the root or inner error payloads. */
@@ -65,7 +68,12 @@ function unrollErrors(error: unknown): unknown[] {
   let curr = error;
   for (let i = 0; i < 5 && curr; i++) {
     chain.push(curr);
-    if (typeof curr === 'object' && curr !== null && 'cause' in curr && (curr as { cause?: unknown }).cause) {
+    if (
+      typeof curr === 'object' &&
+      curr !== null &&
+      'cause' in curr &&
+      (curr as { cause?: unknown }).cause
+    ) {
       curr = (curr as { cause?: unknown }).cause;
     } else {
       break;

@@ -180,7 +180,9 @@ describe('CFG-84 — readQuotaRetryHint reader', () => {
   });
 
   it('returns null for other providers (e.g. OpenAI rate limit with no Gemini markings)', () => {
-    const error = new Error('Rate limit reached for default-gpt-4o. Please retry in 5s.') as Error & {
+    const error = new Error(
+      'Rate limit reached for default-gpt-4o. Please retry in 5s.'
+    ) as Error & {
       statusCode: number;
     };
     error.statusCode = 429;

@@ -627,6 +627,11 @@
       "arity": 0
     },
     {
+      "name": "QuotaRetryHint",
+      "file": "core/quotaCooldown.d.ts",
+      "arity": 0
+    },
+    {
       "name": "RaterNegotiationRound",
       "file": "core/shell/rater.d.ts",
       "arity": 0

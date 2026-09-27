@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  AIMessage,
-  HumanMessage,
-  ToolMessage,
-  type BaseMessage,
-} from '@langchain/core/messages';
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { MemorySaver } from '@langchain/langgraph';
 import { tool } from '@langchain/core/tools';
@@ -26,34 +21,6 @@ vi.mock('#src/utils/consoleUtils.js', async (importOriginal) => {
     displayDebug: vi.fn(),
   };
 });
-
-const RECORDED_QUOTA_429 = {
-  error: {
-    code: 429,
-    message:
-      'You exceeded your current quota, please check your plan and billing details. For more ' +
-      'information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To ' +
-      'monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for ' +
-      'metric: generativelanguage.googleapis.com/generate_content_paid_tier_2_input_token_count, ' +
-      'limit: 3000000, model: gemini-3.8-flash\nPlease retry in 51.386192716s.',
-    status: 'RESOURCE_EXHAUSTED',
-    details: [
-      {
-        '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
-        violations: [
-          {
-            quotaMetric:
-              'generativelanguage.googleapis.com/generate_content_paid_tier_2_input_token_count',
-            quotaId: 'GenerateContentPaidTierInputTokensPerModelPerMinute-PaidTier2',
-            quotaDimensions: { location: 'global', model: 'gemini-3.8-flash' },
-            quotaValue: '3000000',
-          },
-        ],
-      },
-      { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '14s' },
-    ],
-  },
-};
 
 function makeQuotaError(overrides: { message?: string; waitSec?: number; quotaId?: string } = {}) {
   const waitSec = overrides.waitSec ?? 51.386192716;
@@ -339,7 +306,9 @@ describe('CFG-84 — GthAgentRunner quota cooldown reactive seam', () => {
 
     // Check su.warn was called on the plain surface with the wait line
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("The provider's quota is exhausted; waiting 51 seconds before retrying.")
+      expect.stringContaining(
+        "The provider's quota is exhausted; waiting 51 seconds before retrying."
+      )
     );
 
     await vi.advanceTimersByTimeAsync(52_000);
