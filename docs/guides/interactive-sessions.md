@@ -218,6 +218,21 @@ A turn is retried once. If the conversation still does not fit after being compa
 and says why — folding it again would only eat the recent messages it just kept, so the next move is
 yours: `/clear` and start fresh, or ask for something narrower.
 
+#### When a per-minute quota is exhausted
+
+When calling Google Gemini models on tier 1 or tier 2 keys, a turn can hit the provider's
+per-minute token quota (`429 RESOURCE_EXHAUSTED`). When the provider names a short wait
+(under 90 seconds), the session announces the wait and pauses before retrying rather than ending
+with an error:
+
+```
+The provider's quota is exhausted; waiting 51 seconds before retrying.
+```
+
+The tool calls that ran earlier in the turn are preserved in the session state and are not
+re-executed when the turn resumes. At most two cooldowns are permitted per turn; a third failure
+or a longer wait past 90 seconds ends the run with a `rate_limited` termination notice.
+
 ### Running a command with a message half-written
 
 Typing `/` only opens the menu on an empty line, so with `please refactor the fo` already in the

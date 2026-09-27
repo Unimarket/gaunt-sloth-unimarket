@@ -562,6 +562,14 @@ speech generation has no reasoning panel to fill.
 }
 ```
 
+**Per-minute quota cooldown (google-genai)**
+
+When a Gemini call hits a per-minute token or request quota (`429 RESOURCE_EXHAUSTED`) and the
+provider names a retry delay under 90 seconds, Gaunt Sloth waits out the provider's retry hint
+(taking the longer of structured and prose delay hints) and automatically re-sends the request
+instead of terminating the run. Up to two cooldowns are permitted in a single turn. Refusals with
+longer delays, daily quotas, or other error classes terminate immediately.
+
 **Example of .gsloth.config.json for Open Router**
 
 ```json

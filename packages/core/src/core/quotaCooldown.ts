@@ -27,6 +27,8 @@
  *   retries; a balance cap does not recover by waiting.
  */
 
+import type { StatusLevel } from '#src/core/types.js';
+
 /** Maximum wait duration in milliseconds for a quota cooldown (90 seconds). */
 export const MAX_QUOTA_COOLDOWN_MS = 90_000;
 
