@@ -12,8 +12,22 @@
  * this one function; two spawn sites reading the cwd directly would have to be found first.
  */
 import { getCurrentWorkDir } from '@gaunt-sloth/core/utils/systemUtils.js';
+import {
+  resolveShellCwd as coreResolveShellCwd,
+  type ShellCwdResult,
+} from '@gaunt-sloth/core/core/shell/cwd.js';
 
 /** Working directory the shell tool and custom-tool subprocesses spawn in. */
 export function getShellWorkDir(): string {
   return getCurrentWorkDir();
 }
+
+/**
+ * Resolves a shell cwd parameter against getShellWorkDir() (EXT-199).
+ * Relative paths resolve against getShellWorkDir(), never against process.cwd().
+ */
+export function resolveShellCwd(requestedCwd?: string): ShellCwdResult {
+  return coreResolveShellCwd(requestedCwd, getShellWorkDir());
+}
+
+export { type ShellCwdResult } from '@gaunt-sloth/core/core/shell/cwd.js';

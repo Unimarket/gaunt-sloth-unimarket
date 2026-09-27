@@ -26,7 +26,7 @@ import { createInterface, stdin, stdout } from '@gaunt-sloth/core/utils/systemUt
 // implementation and cannot drift. `buildScrubbedEnv`/`getShellWorkDir` are the shell helpers the
 // dev toolkit imports; `killProcessGroup` is exported from GthDevToolkit itself. Do NOT re-implement.
 import { buildScrubbedEnv } from '#src/tools/shell/env.js';
-import { getShellWorkDir } from '#src/tools/shell/workDir.js';
+import { getShellWorkDir, resolveShellCwd } from '#src/tools/shell/workDir.js';
 import { killProcessGroup } from '#src/tools/GthDevToolkit.js';
 
 // Helper function to create a tool with execute type. The fn's second parameter is LangChain's
@@ -216,7 +216,8 @@ export default class GthCustomToolkit extends BaseToolkit {
     command: string,
     toolName: string,
     timeoutSeconds?: number,
-    toolCallId?: string
+    toolCallId?: string,
+    requestedCwd?: string
   ): Promise<string> {
     // TUI-C17: the "Executing" notice + live child output go through the tool-output channel.
     // With no subscriber (every non-TUI surface) the channel's default sink reproduces the
@@ -229,13 +230,26 @@ export default class GthCustomToolkit extends BaseToolkit {
       text: `🔧 Executing ${toolName}: ${command}`,
     });
 
+    let spawnCwd: string;
+    if (requestedCwd !== undefined) {
+      const resolved = resolveShellCwd(requestedCwd);
+      if (resolved.kind === 'refused') {
+        emitToolOutput({ toolCallId, toolName, kind: 'error', text: resolved.message });
+        throw new Error(resolved.message);
+      }
+      spawnCwd = resolved.cwd;
+    } else {
+      spawnCwd = getShellWorkDir();
+    }
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, {
         shell: true,
         // EXT-42: spawn in the SAME working directory as GthDevToolkit's `run_shell_command`, via
         // the shared getShellWorkDir() helper, so custom-tool subprocesses and the agent's own shell
         // agree on one path namespace (see tools/shell/workDir.ts).
-        cwd: getShellWorkDir(),
+        // [[EXT-199]] honours per-call cwd, falling back to getShellWorkDir() when omitted.
+        cwd: spawnCwd,
         // EXT-39 (part 2): give the child /dev/null on stdin so it reads EOF immediately instead
         // of inheriting an open-but-never-written `pipe` (spawn's default). Without this, a spawned
         // command that probes stdin — notably a nested `gth` invocation (a custom tool shelling out

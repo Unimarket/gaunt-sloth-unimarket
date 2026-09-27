@@ -22,7 +22,7 @@ import { ShellCommandFailedError } from '@gaunt-sloth/core/core/shell/ShellComma
 import { buildHardlineRefusal, checkHardline } from '@gaunt-sloth/core/core/shell/hardline.js';
 import { buildScrubbedEnv } from '#src/tools/shell/env.js';
 import { OutputBuffer } from '#src/tools/shell/outputBuffer.js';
-import { getShellWorkDir } from '#src/tools/shell/workDir.js';
+import { getShellWorkDir, resolveShellCwd } from '#src/tools/shell/workDir.js';
 
 // EXT-21: `ShellCommandFailedError` lives in core so any agent can recognise a shell failure
 // without breaking the agent→core dependency direction (the lean `GthLangChainAgent` lives in core
@@ -238,6 +238,17 @@ const timeoutMsArg = (ceilingMs: number) =>
 /**
  * Schema definitions for built-in tools.
  *
+ * **[[EXT-199]] deliberate decision: the fixed `run_*` tools do NOT take `cwd`.**
+ * Three reasons:
+ *  1. **Configured at project root:** Fixed tools (`run_tests`, `run_build`, `run_lint`) run
+ *     commands statically authored in `.gsloth.config.*` specifically meant for the project root.
+ *  2. **Zero-friction vs unprompted escape:** Fixed commands execute without an approval gate.
+ *     Accepting `cwd` on fixed tools would allow directory traversal outside the project on an
+ *     unprompted path, or require introducing approval prompts to historically unprompted tools.
+ *  3. **`run_shell_command` already covers subdirectory execution:** If the agent needs to run
+ *     tests or linting in a specific workspace directory, `run_shell_command` with `cwd` provides
+ *     the exact mechanism with full approval gating and safety verification.
+ *
  * **[[EXT-125]] scope item 3, decided: the fixed `run_*` tools take the per-call budget too.**
  * Three reasons, in the order that decided it:
  *
@@ -298,6 +309,13 @@ const RunShellCommandArgsSchema = (ceilingMs: number) =>
           'RE-CALLING a command that was rejected, so the reviewer can weigh what you are trying ' +
           'to do. Address the objection you were given rather than restating the request; a ' +
           'justification that does not match what the command actually does is rejected outright.'
+      ),
+    cwd: z
+      .string()
+      .optional()
+      .describe(
+        'Optional. Working directory to run the command in. Relative paths resolve against the ' +
+          'session work directory. If omitted, runs in the session work directory.'
       ),
   });
 
@@ -420,7 +438,8 @@ export default class GthDevToolkit extends BaseToolkit {
     command: string,
     toolName: string,
     toolCallId?: string,
-    requestedTimeoutMs?: number
+    requestedTimeoutMs?: number,
+    requestedCwd?: string
   ): Promise<string> {
     // TUI-C17: the "Executing" notice + live child output go through the tool-output channel.
     // With no subscriber (every non-TUI surface) the channel's default sink reproduces the
@@ -465,13 +484,29 @@ export default class GthDevToolkit extends BaseToolkit {
     const timeoutMs = budget.timeoutMs;
     const maxOutputBytes = getShellMaxOutputBytes(this.commands);
 
+    // [[EXT-199]] — validate and resolve cwd if provided.
+    // Validated in the tool schema and again here in the resolver before spawn.
+    let spawnCwd: string;
+    if (requestedCwd !== undefined) {
+      const resolved = resolveShellCwd(requestedCwd);
+      if (resolved.kind === 'refused') {
+        // Refusal: nonexistent or non-directory cwd runs nothing.
+        emitToolOutput({ toolCallId, toolName, kind: 'warning', text: `\n📁 ${resolved.message}` });
+        return resolved.message;
+      }
+      spawnCwd = resolved.cwd;
+    } else {
+      spawnCwd = getShellWorkDir();
+    }
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, {
         shell: true,
         // EXT-22 (S4) / EXT-23: spawn in the SAME directory the filesystem tools are rooted at, so
         // the shell tool and the fs tools operate on one path namespace instead of diverging.
         // Resolved through the shared seam (see tools/shell/workDir.ts) and evaluated at call time.
-        cwd: getShellWorkDir(),
+        // [[EXT-199]] honours per-call cwd, falling back to getShellWorkDir() when omitted.
+        cwd: spawnCwd,
         // (1) Never let the child block on stdin (e.g. git commit opening $EDITOR).
         stdio: ['ignore', 'pipe', 'pipe'],
         // (1) POSIX: own process group so we can kill the whole tree on timeout
@@ -724,7 +759,8 @@ export default class GthDevToolkit extends BaseToolkit {
               args.command,
               'run_shell_command',
               config?.toolCall?.id,
-              args.timeoutMs
+              args.timeoutMs,
+              args.cwd
             );
           },
           {

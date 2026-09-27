@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url';
 import { emitKeypressEvents } from 'node:readline';
 import { createInterface, type Interface as ReadLineInterface } from 'node:readline/promises';
 import { displayInfo, displayWarning } from './consoleUtils.js';
-import { createWriteStream, readFileSync, type WriteStream } from 'node:fs';
+import { createWriteStream, readFileSync, realpathSync, type WriteStream } from 'node:fs';
 import { ProgressIndicator } from '#src/utils/ProgressIndicator.js';
 
 /**
@@ -27,6 +27,7 @@ export interface ProgramLike {
 interface InnerState {
   installDir: string | null | undefined;
   projectDir: string | undefined;
+  startupWorkDir: string | undefined;
   stringFromStdin: string;
   useColour: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -38,6 +39,7 @@ interface InnerState {
 const innerState: InnerState = {
   installDir: undefined,
   projectDir: undefined,
+  startupWorkDir: undefined,
   stringFromStdin: '',
   useColour: false,
   waitForEscapeCallback: undefined,
@@ -247,6 +249,38 @@ export const getProjectDir = (): string => innerState.projectDir ?? getCurrentWo
  * into an explicit cwd. See `resolveRaterModel`.
  */
 export const peekProjectDir = (): string | undefined => innerState.projectDir;
+
+/**
+ * EXT-199: The session's startup work directory, captured ONCE and realpath-resolved.
+ * Represents "the project" boundary for shell cwd containment and approvals.
+ * Unlike getProjectDir() or getCurrentWorkDir(), it is never a moving value.
+ */
+export const getStartupWorkDir = (): string => {
+  if (!innerState.startupWorkDir) {
+    const raw = getCurrentWorkDir();
+    try {
+      innerState.startupWorkDir = realpathSync(raw);
+    } catch {
+      innerState.startupWorkDir = resolve(raw);
+    }
+  }
+  return innerState.startupWorkDir;
+};
+
+/**
+ * EXT-199: Set or reset the startup work directory. Used for explicit initialization or tests.
+ */
+export const setStartupWorkDir = (dir: string | undefined): void => {
+  if (dir !== undefined) {
+    try {
+      innerState.startupWorkDir = realpathSync(dir);
+    } catch {
+      innerState.startupWorkDir = resolve(dir);
+    }
+  } else {
+    innerState.startupWorkDir = undefined;
+  }
+};
 export const getInstallDir = (): string => {
   if (innerState.installDir) {
     return innerState.installDir;
