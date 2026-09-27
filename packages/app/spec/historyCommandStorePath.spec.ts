@@ -76,6 +76,15 @@ describe('GS2-119 — which store the history commands open', () => {
     expect(resolveIn(undefined).store).toBe(join(dir, 'project-store'));
   });
 
+  it('a project config that does not set history.dbPath defers to the global one', () => {
+    globalConfig(join(dir, 'global-store'));
+    writeFileSync(
+      join(project, '.gsloth.config.json'),
+      JSON.stringify({ history: { enabled: true } })
+    );
+    expect(resolveIn(undefined).store).toBe(join(dir, 'global-store'));
+  });
+
   it('--db wins over both', () => {
     globalConfig(join(dir, 'global-store'));
     projectConfig(join(dir, 'project-store'));

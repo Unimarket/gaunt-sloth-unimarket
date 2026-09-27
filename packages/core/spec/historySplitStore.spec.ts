@@ -428,8 +428,12 @@ describe('GS2-121 — the split history store', () => {
     it("a live split's lock is respected, and a stale one is taken over", () => {
       writeLegacyStore(dbPath);
       writeFileSync(`${dbPath}.migrating`, 'another process\n');
-      // Another process is splitting: this open leaves the file alone and reports no store.
+      // Another process has been splitting for five minutes, inside the stale limit: a long split
+      // still in progress. This open leaves the file alone and reports no store.
+      const recent = new Date(Date.now() - 5 * 60 * 1000);
+      utimesSync(`${dbPath}.migrating`, recent, recent);
       expect(openHistoryStore(dbPath)).toBeNull();
+      expect(existsSync(`${dbPath}.migrating`)).toBe(true);
       expect(statSync(dbPath).isFile()).toBe(true);
 
       // The same lock, abandoned long ago: taken over, and the split completes.

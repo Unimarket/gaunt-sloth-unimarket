@@ -994,6 +994,11 @@ export async function loadConfiguredHistoryDbPath(
       }
       const projectDbPath = pick(raw);
       if (projectDbPath !== undefined) return projectDbPath;
+      // With a project layer present, a run's underlay is the plain global config, read with no
+      // profile and without walking its `extends` (`applyGlobalConfigBase`), so that is the one
+      // this defers to.
+      const underlay = await loadGlobalRawConfigUnvalidated();
+      return underlay ? pick(underlay.raw) : undefined;
     }
     const globalRaw = await loadGlobalRawConfigUnvalidated(
       globalLayerProfile(commandLineConfigOverrides)
