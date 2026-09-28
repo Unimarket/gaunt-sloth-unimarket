@@ -20,7 +20,12 @@ import type { GthCommand } from '@gaunt-sloth/core/core/types.js';
 import { emitToolOutput } from '@gaunt-sloth/core/core/toolOutputChannel.js';
 import { ShellCommandFailedError } from '@gaunt-sloth/core/core/shell/ShellCommandFailedError.js';
 import { buildHardlineRefusal, checkHardline } from '@gaunt-sloth/core/core/shell/hardline.js';
-import { buildScrubbedEnv } from '#src/tools/shell/env.js';
+import {
+  buildCommandEnv,
+  describeRemovedOnFailure,
+  DEFAULT_COMMAND_ENV_POLICY,
+  type CommandEnvPolicy,
+} from '#src/tools/shell/env.js';
 import { OutputBuffer } from '#src/tools/shell/outputBuffer.js';
 import { getShellWorkDir, resolveShellCwd } from '#src/tools/shell/workDir.js';
 
@@ -330,11 +335,21 @@ export default class GthDevToolkit extends BaseToolkit {
    * wiring. Omitted → historical OFF-by-default behaviour.
    */
   private readonly command: GthCommand | undefined;
+  /**
+   * EXT-126 — the resolved `commandEnv` setting: whether credentials are scrubbed from a spawned
+   * command's environment, and which names pass. Omitted → nothing scrubbed (the default).
+   */
+  private readonly commandEnv: CommandEnvPolicy;
 
-  constructor(commands: GthDevToolsConfig = {}, command?: GthCommand | undefined) {
+  constructor(
+    commands: GthDevToolsConfig = {},
+    command?: GthCommand | undefined,
+    commandEnv: CommandEnvPolicy = DEFAULT_COMMAND_ENV_POLICY
+  ) {
     super();
     this.commands = commands;
     this.command = command;
+    this.commandEnv = commandEnv;
     this.tools = this.createTools();
   }
 
@@ -420,7 +435,9 @@ export default class GthDevToolkit extends BaseToolkit {
    *     value, the spawn and the clean/non-zero-exit bodies are all unchanged by this parameter's
    *     existence,
    *  2. output capped with a head/tail window + temp-file spillover,
-   *  3. provider/LLM credentials scrubbed from the child env,
+   *  3. the child env built by `buildCommandEnv`: credentials scrubbed only when the
+   *     `commandEnv.scrubCredentials` setting is on (EXT-126), the synthesised `NODE_ENV` always
+   *     dropped,
    *  4. an unbypassable hardline blocklist (refuses catastrophic commands BEFORE
    *     spawn — fires even when confirmation is bypassed by approvals.mode: bypass).
    *
@@ -499,6 +516,9 @@ export default class GthDevToolkit extends BaseToolkit {
       spawnCwd = getShellWorkDir();
     }
 
+    // (3) EXT-126: the child env per the `commandEnv` setting (credentials kept by default).
+    const childEnv = buildCommandEnv(this.commandEnv);
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, {
         shell: true,
@@ -512,8 +532,8 @@ export default class GthDevToolkit extends BaseToolkit {
         // (1) POSIX: own process group so we can kill the whole tree on timeout
         // (see killProcessGroup). No-op/harmful on Windows, which uses taskkill /T.
         detached: process.platform !== 'win32',
-        // (3) Child env with provider/LLM credentials removed.
-        env: buildScrubbedEnv(),
+        // (3) Child env: credentials removed only when `commandEnv.scrubCredentials` is on.
+        env: childEnv.env,
       });
 
       // (2) Bounded capture for the returned message; live streaming is uncapped.
@@ -588,9 +608,15 @@ export default class GthDevToolkit extends BaseToolkit {
         } else {
           // EXT-20: a non-zero exit is a failure — reject (was resolve) so the softening
           // middleware surfaces the ✗ (isError) signal while preserving the full output body.
+          // EXT-126: with scrubbing on, one extra line names what was removed (names only), so a
+          // command that failed for want of a key says so instead of only the child's own error.
+          const scrubNote = describeRemovedOnFailure(childEnv.removed);
           reject(
             new ShellCommandFailedError({
-              output: body + `\n\nCommand '${command}' exited with code ${code}`,
+              output:
+                body +
+                `\n\nCommand '${command}' exited with code ${code}` +
+                (scrubNote ? `\n${scrubNote}` : ''),
               exitCode: code,
               command,
               toolName,

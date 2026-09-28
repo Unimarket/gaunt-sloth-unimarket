@@ -610,6 +610,12 @@ export interface GthConfig {
     redact?: boolean;
   };
   /**
+   * EXT-126 — what a command Gaunt Sloth spawns (the built-in shell tool and every custom tool)
+   * receives as its environment. See {@link CommandEnvConfig}. Top-level only: one setting governs
+   * every mode, so there is no per-command variant to diverge from it.
+   */
+  commandEnv?: CommandEnvConfig;
+  /**
    * Transient (runtime-only) extra filesystem roots the agent may read/write for THIS run, in
    * addition to the cwd sandbox. Populated by `gth exec --allow-dir <path>` (repeatable); never
    * persisted to a config file.
@@ -861,6 +867,33 @@ export interface BinaryFormatConfig {
 
 export type CustomToolsConfig = Record<string, CustomCommandConfig>;
 export type BuiltInToolsConfig = Record<string, unknown>;
+
+/**
+ * EXT-126 — the environment a spawned command receives: the built-in shell tool
+ * (`run_shell_command` and the `run_*` dev tools) and every custom tool.
+ *
+ * **Off by default.** With `scrubCredentials` absent or `false`, a spawned command inherits Gaunt
+ * Sloth's environment unchanged, credentials included. That is an accepted risk: anything that
+ * prints its environment puts the operator's keys into the tool result, which is sent to the model
+ * provider and saved in session history. Turn scrubbing on to isolate spawned commands.
+ *
+ * With `scrubCredentials: true`, every variable whose name ends in `KEY`, `TOKEN`, `SECRET`,
+ * `PASSWORD`, `PASSWD` or `CREDENTIALS` (any case) is removed, plus a fixed list of cloud and
+ * provider credentials no ending catches, such as `AWS_ACCESS_KEY_ID`. There are no built-in
+ * exceptions; `passthrough` names the variables that survive.
+ *
+ * The setting governs credentials only. The `NODE_ENV` Gaunt Sloth synthesises for its own renderer
+ * is dropped from every spawned command whatever this says.
+ */
+export interface CommandEnvConfig {
+  /** Remove credential-shaped variables from a spawned command's environment. Default `false`. */
+  scrubCredentials?: boolean;
+  /**
+   * Exact variable names kept when `scrubCredentials` is on, matched case-insensitively, with no
+   * wildcards. Ignored, with a warning at config load, when scrubbing is off.
+   */
+  passthrough?: string[];
+}
 
 /**
  * Configuration for review rating feature.

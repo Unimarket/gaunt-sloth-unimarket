@@ -147,6 +147,11 @@
       "arity": 0
     },
     {
+      "name": "CommandEnvConfig",
+      "file": "config/types.d.ts",
+      "arity": 0
+    },
+    {
       "name": "CommandLineConfigOverrides",
       "file": "config/types.d.ts",
       "arity": 0

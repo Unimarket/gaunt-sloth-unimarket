@@ -73,7 +73,7 @@ if (process.argv.includes('--acp-agent')) {
   // builder could not tell "drop it, we made it up" from "keep it, the operator
   // set it". It travels by environment rather than by module state because it has
   // to cross into packages/agent, which this file cannot import from.
-  // See packages/agent/src/tools/shell/env.ts (buildScrubbedEnv).
+  // See packages/agent/src/tools/shell/env.ts (buildCommandEnv).
   //
   // Proof this still works: packages/app/tui-e2e/react-build.tui.test.ts asserts a
   // real PTY run of THIS entry point loads react.production.js, and its sibling

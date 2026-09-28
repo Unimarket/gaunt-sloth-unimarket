@@ -1922,6 +1922,25 @@ function resolvePrecedencePickedField(
 }
 
 /**
+ * EXT-126 — the warning for a `commandEnv.passthrough` list configured while scrubbing is off, or
+ * `undefined` when there is nothing to say. With scrubbing off nothing is removed, so the list has
+ * no effect; accepting it in silence would let an operator believe they had narrowed what a
+ * spawned command can see when they had not.
+ */
+function describeInertCommandEnvPassthrough(
+  commandEnv: GthConfig['commandEnv']
+): string | undefined {
+  const passthrough = commandEnv?.passthrough;
+  if (!passthrough || passthrough.length === 0) return undefined;
+  if (commandEnv?.scrubCredentials === true) return undefined;
+  return (
+    `commandEnv.passthrough is set (${passthrough.join(', ')}) but commandEnv.scrubCredentials ` +
+    'is off, so it has no effect: spawned commands already inherit every variable. Set ' +
+    'commandEnv.scrubCredentials to true to scrub credentials and keep only the listed ones.'
+  );
+}
+
+/**
  * Resolve a fully-merged {@link GthConfig} from a partial config + CLI overrides WITHOUT
  * any global side effects. It deep-merges defaults, applies CLI overrides, resolves the numeric
  * `consoleLevel` (warning + defaulting to INFO on an invalid value), and computes
@@ -2055,6 +2074,15 @@ export function resolveConfig(
       );
       mergedConfig.consoleLevel = StatusLevel.INFO;
     }
+  }
+
+  // EXT-126 — a passthrough list only means something while scrubbing is on. Checked HERE, on the
+  // merged config, rather than per layer: a global config that turns scrubbing on and a project
+  // config that adds passthrough names are a valid pair, and a per-layer check would warn about
+  // the project file alone.
+  const inertPassthrough = describeInertCommandEnvPassthrough(mergedConfig.commandEnv);
+  if (inertPassthrough) {
+    displayWarning(inertPassthrough);
   }
 
   mergedConfig.canInterruptInferenceWithEsc = mergedConfig.canInterruptInferenceWithEsc && isTTY();

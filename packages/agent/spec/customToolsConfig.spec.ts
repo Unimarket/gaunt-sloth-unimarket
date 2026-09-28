@@ -23,7 +23,7 @@ const systemUtilsMock = {
   },
   getCurrentWorkDir: vi.fn(() => '/test/project'),
 };
-// EXT-42: partial mock (spread over the real module) so buildScrubbedEnv()'s real `env` — and the
+// EXT-42: partial mock (spread over the real module) so buildCommandEnv()'s real `env` — and the
 // stdin/createInterface the validation-override prompt uses — survive, while keeping the intentional
 // stdout + getCurrentWorkDir stubs. GthCustomToolkit now reaches `env`/work-dir through the shared
 // scrub/work-dir helpers; a full replacement would drop those exports and throw at spawn time.
@@ -394,6 +394,63 @@ describe('Custom Tools Configuration', () => {
       // Invoke the tool with parameters
       const result = await tool!.invoke({ migrationName: 'add_users' });
       expect(result).toContain('npm run migrate -- add_users');
+    });
+  });
+
+  /**
+   * EXT-126 — one `commandEnv` setting governs BOTH spawn sites. Driven through `getDefaultTools`,
+   * the path every mode builds its tools on, so a toolkit that stopped receiving the resolved
+   * setting would show up here even though its own unit spec (which constructs it directly) stays
+   * green.
+   */
+  describe('EXT-126: commandEnv reaches both spawn sites', () => {
+    const spawnedEnv = (): NodeJS.ProcessEnv =>
+      (childProcessMock.spawn.mock.calls.at(-1)![1] as { env: NodeJS.ProcessEnv }).env;
+
+    const invokeBoth = async (config: GthConfig) => {
+      const tools = await getDefaultTools(config, 'code');
+      const custom = tools.find((t) => t.name === 'probe_tool');
+      const shell = tools.find((t) => t.name === 'run_shell_command');
+      expect(custom).toBeDefined();
+      expect(shell).toBeDefined();
+      await custom!.invoke({});
+      const customEnv = spawnedEnv();
+      await shell!.invoke({ command: 'echo probe' });
+      const shellEnv = spawnedEnv();
+      return { customEnv, shellEnv };
+    };
+
+    const customTools = { probe_tool: { command: 'echo probe', description: 'Probe' } };
+
+    it('default config: both spawn sites inherit the credential', async () => {
+      process.env.EXT126_WIRING_SECRET = 'fixture-wiring';
+      try {
+        const { customEnv, shellEnv } = await invokeBoth(createMockConfig({ customTools }));
+        expect(customEnv.EXT126_WIRING_SECRET).toBe('fixture-wiring');
+        expect(shellEnv.EXT126_WIRING_SECRET).toBe('fixture-wiring');
+      } finally {
+        delete process.env.EXT126_WIRING_SECRET;
+      }
+    });
+
+    it('scrubCredentials on: both spawn sites drop the credential and honour passthrough', async () => {
+      process.env.EXT126_WIRING_SECRET = 'fixture-wiring';
+      process.env.EXT126_WIRING_TOKEN = 'fixture-kept';
+      try {
+        const { customEnv, shellEnv } = await invokeBoth(
+          createMockConfig({
+            customTools,
+            commandEnv: { scrubCredentials: true, passthrough: ['EXT126_WIRING_TOKEN'] },
+          })
+        );
+        expect(customEnv.EXT126_WIRING_SECRET).toBeUndefined();
+        expect(shellEnv.EXT126_WIRING_SECRET).toBeUndefined();
+        expect(customEnv.EXT126_WIRING_TOKEN).toBe('fixture-kept');
+        expect(shellEnv.EXT126_WIRING_TOKEN).toBe('fixture-kept');
+      } finally {
+        delete process.env.EXT126_WIRING_SECRET;
+        delete process.env.EXT126_WIRING_TOKEN;
+      }
     });
   });
 });

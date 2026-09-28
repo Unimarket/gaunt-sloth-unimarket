@@ -689,6 +689,23 @@
         ]
       }
     },
+    "commandEnv": {
+      "type": "object",
+      "properties": {
+        "scrubCredentials": {
+          "type": "boolean"
+        },
+        "passthrough": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Environment of commands Gaunt Sloth spawns (the shell tool and custom tools). scrubCredentials (default false) removes variables whose names end in KEY, TOKEN, SECRET, PASSWORD, PASSWD or CREDENTIALS, plus known cloud credentials; passthrough lists exact names kept when scrubbing is on. With the default, a printed environment reaches the model provider and session history."
+    },
     "mcpServers": {
       "type": "object",
       "propertyNames": {

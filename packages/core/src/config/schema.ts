@@ -95,6 +95,61 @@ const customToolsConfigSchema = z.record(z.string(), customCommandConfigSchema);
 const customToolsOrFalseSchema = z.union([z.literal(false), customToolsConfigSchema]);
 
 /**
+ * EXT-126 — `commandEnv`: what a command Gaunt Sloth spawns receives as its environment. It covers
+ * both places `gth` spawns a command, the built-in shell tool (`GthDevToolkit`) and custom tools
+ * (`GthCustomToolkit`), which is why it is not a key of either `builtInTools.shell` or
+ * `customTools`: one setting has to govern both, and splitting it would let the two spawn sites
+ * disagree about whether a key may reach a child.
+ *
+ * **Top level, not per command.** Every mode — the interactive session, `exec`/`code`, and the
+ * AG-UI and ACP servers — builds its tools from the same resolved config, and an operator asking
+ * for isolation means it for all of them. A `commands.<command>.commandEnv` would make "is this
+ * process scrubbing?" depend on which door a request came through, which is the question an
+ * operator exposing a server most needs a single answer to.
+ *
+ * **Default off, and the risk that accepts.** Absent (or `scrubCredentials: false`), a spawned
+ * command inherits the parent's credentials unchanged. Anything that prints its environment then
+ * puts the operator's keys into the tool result, which is sent to the model provider and saved in
+ * session history. The trade was made deliberately: always-on scrubbing broke every command that
+ * composes `gth` with itself or runs a live-model gate, and it failed with a provider error about
+ * the wrong layer. An operator who wants isolation turns scrubbing on and names what may pass.
+ *
+ * **Credentials only.** The synthesised `NODE_ENV` the CLI sets for its own renderer is dropped
+ * from every spawned command in every configuration; this setting cannot bring it back.
+ *
+ * Defaulted at the read site (`resolveCommandEnvPolicy` in the agent package), not with a
+ * `.default()` here and not in `DEFAULT_CONFIG`, so the effective-config snapshot does not churn
+ * for users who never set it. A strict object on purpose: a misspelt `scrubCredential: true` would
+ * otherwise be stripped in silence, and the operator who opted into isolation would not get it.
+ * `passthrough` rejects `*` and `?` for the same reason — names are exact, and a pattern that
+ * matched nothing would fail open without a word.
+ */
+const commandEnvSchema = z
+  .strictObject({
+    scrubCredentials: z.boolean().optional(),
+    passthrough: z
+      .array(
+        z
+          .string()
+          .min(1, 'commandEnv.passthrough entries must be non-empty variable names.')
+          .refine(
+            (name) => !/[*?]/.test(name),
+            'commandEnv.passthrough takes exact variable names; wildcards (* or ?) are not ' +
+              'supported, so list each variable by name.'
+          )
+      )
+      .optional(),
+  })
+  .meta({
+    description:
+      'Environment of commands Gaunt Sloth spawns (the shell tool and custom tools). ' +
+      'scrubCredentials (default false) removes variables whose names end in KEY, TOKEN, SECRET, ' +
+      'PASSWORD, PASSWD or CREDENTIALS, plus known cloud credentials; passthrough lists exact ' +
+      'names kept when scrubbing is on. With the default, a printed environment reaches the ' +
+      'model provider and session history.',
+  });
+
+/**
  * CFG-68 — the `binaryFormats` types an attachment can actually be DELIVERED in.
  *
  * `video` and `binary` are deliberately absent. `@langchain/core`'s
@@ -1357,6 +1412,9 @@ export const rawGthConfigSchema = z.looseObject({
   recursionLimit: z.number().optional(),
   consoleLevel: z.union([z.string(), z.number()]).optional(),
   customTools: customToolsConfigSchema.optional(),
+  // EXT-126 — the environment a spawned command receives (the built-in shell tool and every custom
+  // tool). See {@link commandEnvSchema} for the placement argument and the accepted risk.
+  commandEnv: commandEnvSchema.optional(),
   // EXT-78 — keyed by the server's own name, whose two refused spellings ride on the key schema so
   // the emitted JSON Schema states them too ({@link mcpServerNameSchema}).
   mcpServers: z.record(mcpServerNameSchema, z.unknown()).optional(),

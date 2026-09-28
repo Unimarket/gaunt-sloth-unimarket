@@ -319,7 +319,8 @@ the fixed `run_*` commands do not accept `cwd` because they are configured stati
 project root.
 
 **Who may run a command is configured separately**, in the top-level [`approvals`](#approvals)
-setting — not here.
+setting — not here. So is **what a command's environment contains**: by default it inherits your
+credentials, and [`commandEnv`](#a-spawned-commands-environment-commandenv) turns scrubbing on.
 
 ```json
 {
@@ -405,6 +406,8 @@ Custom tools allow you to define custom shell commands that the AI can execute a
 - **Per-Command Control**: Each command can override or disable custom tools
 - **Parameter Support**: Commands can accept dynamic parameters with security validation
 - **Security**: Built-in validation prevents shell injection, directory traversal, and other attacks
+- **Environment**: A custom tool's command inherits your credentials by default; see
+  [`commandEnv`](#a-spawned-commands-environment-commandenv) to scrub them
 
 ### Basic Configuration
 
@@ -677,6 +680,46 @@ Available `allow` values:
 | `null-bytes`          | Null byte characters                                 |
 
 Checks **not** listed in `allow` remain enforced. Each parameter can have its own `allow` list, providing fine-grained control over validation.
+
+## A spawned command's environment (`commandEnv`)
+
+`commandEnv` decides what environment a command Gaunt Sloth spawns receives. It covers both kinds of
+spawned command: the shell tool (`run_shell_command` and the fixed `run_*` commands) and every
+custom tool. It is a **top-level** key only, and every mode obeys it: `chat`, `code`, `exec`, `ask`,
+and the AG-UI and ACP servers.
+
+**By default, a spawned command inherits Gaunt Sloth's environment unchanged, credentials
+included.** A command that composes `gth` with itself, or runs a live-model check, finds the keys it
+needs. The cost is that anything that prints its environment (`env`, `printenv`, a debug dump, a
+crash log) puts your keys into the tool result. That result is sent to the model provider and saved
+in session history. If that is not acceptable, turn scrubbing on.
+
+With `scrubCredentials: true`, Gaunt Sloth removes every variable whose name ends in `KEY`, `TOKEN`,
+`SECRET`, `PASSWORD`, `PASSWD` or `CREDENTIALS`, in any case and with or without an underscore
+before it. `OURCOOLSTARTUP_KEY`, `OPENAI_APIKEY`, `DB_PASSWORD` and `MYSERVICETOKEN` all go. It also
+removes a fixed list of cloud and provider credentials that no ending catches, such as
+`AWS_ACCESS_KEY_ID`. There are no built-in exceptions, and that includes `GITHUB_TOKEN` and
+`GH_TOKEN`: a variable a spawned command should keep goes in `passthrough`. Gaunt Sloth's own PR and
+issue lookups run `gh` from the `gth` process itself, so they keep working without it.
+
+```json
+{
+  "commandEnv": {
+    "scrubCredentials": true,
+    "passthrough": ["GOOGLE_API_KEY", "GH_TOKEN"]
+  }
+}
+```
+
+- `passthrough` takes **exact** variable names, matched case-insensitively. Wildcards are rejected
+  when the config loads, so every name a spawned command keeps is written out.
+- The match is deliberately broad, so it can catch a harmless name, such as a public
+  `…_PUBLISHABLE_KEY`. When a spawned command exits non-zero with scrubbing on, its result carries one
+  extra line naming the variables that were removed (names only, never values). Add the one it
+  needed to `passthrough`.
+- A `passthrough` list with scrubbing off does nothing, so loading the config prints a warning.
+- The `NODE_ENV=production` that Gaunt Sloth sets for its own terminal UI never reaches a spawned
+  command, whichever way `scrubCredentials` is set. A `NODE_ENV` you set yourself passes through.
 
 ## Allowed tools
 

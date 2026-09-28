@@ -20,6 +20,7 @@ import { getCurrentWorkDir } from '@gaunt-sloth/core/utils/systemUtils.js';
 import { GthCommand } from '@gaunt-sloth/core/core/types.js';
 import GthDevToolkit from '#src/tools/GthDevToolkit.js';
 import GthCustomToolkit from '#src/tools/GthCustomToolkit.js';
+import { resolveCommandEnvPolicy, type CommandEnvPolicy } from '#src/tools/shell/env.js';
 
 /**
  * Available built-in tools may be configured in JSON config, see `builtInTools` of {@link @gaunt-sloth/core!config/types.GthConfig | GthConfig}.
@@ -74,14 +75,19 @@ export async function getDefaultTools(
   // `builtInTools` registry by the shared core resolver (was per-command `devTools`).
   const askWrite = command === 'ask' && config.askWriteMode === true;
   const devToolConfig = getEffectiveDevToolsConfig(config, command);
-  const devTools = await filterDevTools(askWrite ? 'code' : command, devToolConfig);
-  const customTools = getCustomTools(config, command);
+  // EXT-126: one `commandEnv` setting, resolved once and handed to BOTH spawn sites, so the shell
+  // tool and custom tools cannot disagree about what a spawned command inherits. Every mode
+  // (interactive, exec/code, AG-UI, ACP) builds its tools here via `createResolvers`.
+  const commandEnv = resolveCommandEnvPolicy(config.commandEnv);
+  const devTools = await filterDevTools(askWrite ? 'code' : command, devToolConfig, commandEnv);
+  const customTools = getCustomTools(config, command, commandEnv);
   return [...filesystemTools, ...devTools, ...customTools, ...builtInTools];
 }
 
 async function filterDevTools(
   command: GthCommand | undefined,
-  devToolConfig: GthDevToolsConfig | undefined
+  devToolConfig: GthDevToolsConfig | undefined,
+  commandEnv: CommandEnvPolicy
 ): Promise<StructuredToolInterface[]> {
   // Dev tools only apply to the do-the-job commands (`code` / `exec`; `ask --write` is mapped
   // to `code` by the caller). EXT-12: for `code` the toolkit is constructed even when no
@@ -95,7 +101,7 @@ async function filterDevTools(
     return [];
   }
   // Pass the command so GthDevToolkit resolves the shell default for the active mode.
-  const toolkit = new GthDevToolkit(devToolConfig ?? {}, command);
+  const toolkit = new GthDevToolkit(devToolConfig ?? {}, command, commandEnv);
   return [...toolkit.getTools()];
 }
 
@@ -103,7 +109,11 @@ async function filterDevTools(
  * Get custom tools based on configuration.
  * Supports global customTools and per-command overrides.
  */
-function getCustomTools(config: GthConfig, command?: GthCommand): StructuredToolInterface[] {
+function getCustomTools(
+  config: GthConfig,
+  command: GthCommand | undefined,
+  commandEnv: CommandEnvPolicy
+): StructuredToolInterface[] {
   // Determine which custom tools to use
   let toolsConfig: CustomToolsConfig | false | undefined;
 
@@ -127,7 +137,7 @@ function getCustomTools(config: GthConfig, command?: GthCommand): StructuredTool
   }
 
   // Create toolkit with the determined config
-  const toolkit = new GthCustomToolkit(toolsConfig);
+  const toolkit = new GthCustomToolkit(toolsConfig, commandEnv);
   return toolkit.getTools();
 }
 

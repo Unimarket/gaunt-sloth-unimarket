@@ -1,31 +1,38 @@
 /**
- * Credential scrubbing for the shell tool's child environment. By default a
- * spawned child inherits `process.env` verbatim, so an approved (or bypassed)
- * command can `echo $ANTHROPIC_API_KEY` and exfiltrate the operator's LLM/cloud
- * credentials. {@link buildScrubbedEnv} returns a copy of the parent env with
- * those credentials removed before spawn.
+ * The environment a spawned command receives — the one builder both spawn sites use: the built-in
+ * shell tool (`GthDevToolkit`) and custom tools (`GthCustomToolkit`).
  *
- * Policy (deliberately scoped):
- * - Strip LLM provider keys and cloud-provider secrets (the explicit blocklist +
- *   a wildcard sweep for `*_API_KEY` / `*_TOKEN` / `*_SECRET` / `*SECRET_KEY`).
- * - LEAVE generic dev env intact (PATH, HOME, SHELL, LANG, npm/pnpm config, …)
- *   so normal commands still work.
- * - LEAVE `GITHUB_TOKEN` / `GH_TOKEN` intact: gaunt-sloth's content/requirement
- *   providers shell out to `gh` (`gh pr diff`, `gh issue view`), so stripping
- *   these would break first-class workflows. They are explicitly allow-listed
- *   against the wildcard `*_TOKEN` sweep.
+ * **Credential scrubbing is opt-in and off by default** (config `commandEnv.scrubCredentials`).
+ * With it off, a spawned command inherits the parent's credentials unchanged. That is an accepted
+ * risk, not an oversight: anything that prints its environment then puts the operator's keys into
+ * the tool result, which is sent to the model provider and saved in session history. Always-on
+ * scrubbing cost too much — every command that composes `gth` with itself, and every live-model
+ * gate run through the shell tool, found no key and failed with a provider error about the wrong
+ * layer. An operator who wants isolation turns scrubbing on.
  *
- * Patterned after hermes-agent `_HERMES_PROVIDER_ENV_BLOCKLIST` (tools/environments/local.py)
- * — but narrower: we only own the provider/cloud-secret floor.
+ * With scrubbing on, {@link isCredentialEnvVar} decides what goes: any name ending in `KEY`,
+ * `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD` or `CREDENTIALS` (any case, with or without an
+ * underscore before it), plus {@link CREDENTIAL_BLOCKLIST} for credential names no ending catches.
+ * The match is deliberately broad: a missed secret leaks silently, while an over-match (a public
+ * `…_PUBLISHABLE_KEY`, a stray `MONKEY`) fails visibly, the failure line names it
+ * ({@link describeRemovedOnFailure}), and one `commandEnv.passthrough` entry fixes it. There are
+ * no built-in exceptions — GitHub tokens included — so everything a spawned command keeps is named
+ * in the operator's own passthrough list. (Gaunt Sloth's own GitHub content and requirement
+ * providers call `gh` from the `gth` process itself and never pass through here.)
+ *
+ * **The setting governs credentials only.** The synthesised `NODE_ENV` drop
+ * ({@link SYNTHESIZED_NODE_ENV_MARKER}) happens in every configuration.
  *
  * @module
  */
 import { env as processEnv } from '@gaunt-sloth/core/utils/systemUtils.js';
+import type { CommandEnvConfig } from '@gaunt-sloth/core/config.js';
 
 /**
- * Explicit blocklist of LLM-provider and cloud credentials. Covers the providers
- * gaunt-sloth (and its consumers) can be configured against, plus the standard
- * cloud secret-bearing vars. Matched case-insensitively.
+ * Explicit blocklist, applied when scrubbing is on, for credential names that no ending in
+ * {@link isCredentialEnvVar} catches (`AWS_ACCESS_KEY_ID`, `…_ACCESS_KEY_ID` generally). Names that
+ * an ending already catches are listed too, so the list stays a readable record of what the
+ * providers Gaunt Sloth can be configured against expect. Matched case-insensitively.
  */
 export const CREDENTIAL_BLOCKLIST: ReadonlyArray<string> = [
   // LLM providers
@@ -54,47 +61,56 @@ export const CREDENTIAL_BLOCKLIST: ReadonlyArray<string> = [
   'AWS_ACCESS_KEY_ID',
 ];
 
-/**
- * Allow-list of credential-shaped names that must survive the wildcard sweep
- * because gaunt-sloth legitimately depends on them. Matched case-insensitively.
- */
-export const CREDENTIAL_ALLOWLIST: ReadonlyArray<string> = [
-  // `gh` CLI auth — used by the github content/requirement providers.
-  'GITHUB_TOKEN',
-  'GH_TOKEN',
-];
+// Any name ENDING in one of these is a credential. No underscore is required before the ending, so
+// `OPENAI_APIKEY` and `MYSERVICETOKEN` match as well as `DB_PASSWORD`.
+const CREDENTIAL_ENDING = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS)$/i;
 
-// Wildcard sweep: any var whose name ends in one of these suffixes is treated as
-// a secret and stripped (unless allow-listed). Catches provider keys we didn't
-// enumerate (e.g. a new `FOO_API_KEY`).
-const SECRET_SUFFIXES = [
-  /_API_KEY$/i,
-  /_SECRET_ACCESS_KEY$/i,
-  /_SECRET_KEY$/i,
-  /_SECRET$/i,
-  /_TOKEN$/i,
-];
-
-function isAllowlisted(name: string): boolean {
-  return CREDENTIAL_ALLOWLIST.some((a) => a.toUpperCase() === name.toUpperCase());
-}
-
-function isBlocklisted(name: string): boolean {
-  return CREDENTIAL_BLOCKLIST.some((b) => b.toUpperCase() === name.toUpperCase());
-}
-
-function matchesSecretSuffix(name: string): boolean {
-  return SECRET_SUFFIXES.some((re) => re.test(name));
+function includesName(list: ReadonlyArray<string>, name: string): boolean {
+  const upper = name.toUpperCase();
+  return list.some((entry) => entry.toUpperCase() === upper);
 }
 
 /**
- * True when an env var name should be scrubbed from the child environment.
- * Exported for testing.
+ * True when a variable name is credential-shaped: it ends in one of the credential endings, or it
+ * is on {@link CREDENTIAL_BLOCKLIST}. Independent of the setting and of any passthrough list.
  */
-export function shouldScrubEnvVar(name: string): boolean {
-  if (isAllowlisted(name)) return false;
-  if (isBlocklisted(name)) return true;
-  return matchesSecretSuffix(name);
+export function isCredentialEnvVar(name: string): boolean {
+  return CREDENTIAL_ENDING.test(name) || includesName(CREDENTIAL_BLOCKLIST, name);
+}
+
+/**
+ * True when scrubbing, once on, removes this variable: it is credential-shaped and not named in
+ * `passthrough` (exact names, case-insensitive, no wildcards).
+ */
+export function shouldScrubEnvVar(name: string, passthrough: ReadonlyArray<string> = []): boolean {
+  return isCredentialEnvVar(name) && !includesName(passthrough, name);
+}
+
+/** The resolved form of the `commandEnv` config, with its read-site defaults applied. */
+export interface CommandEnvPolicy {
+  /** Remove credential-shaped variables. `false` unless the config says exactly `true`. */
+  readonly scrubCredentials: boolean;
+  /** Names kept while scrubbing is on. */
+  readonly passthrough: ReadonlyArray<string>;
+}
+
+/** The policy an absent `commandEnv` resolves to: nothing scrubbed. */
+export const DEFAULT_COMMAND_ENV_POLICY: CommandEnvPolicy = Object.freeze({
+  scrubCredentials: false,
+  passthrough: Object.freeze([]) as ReadonlyArray<string>,
+});
+
+/**
+ * Resolve the `commandEnv` config into a {@link CommandEnvPolicy}. The default lives here, at the
+ * read site, rather than in the schema or `DEFAULT_CONFIG`: only an explicit `true` turns scrubbing
+ * on.
+ */
+export function resolveCommandEnvPolicy(config: CommandEnvConfig | undefined): CommandEnvPolicy {
+  if (!config) return DEFAULT_COMMAND_ENV_POLICY;
+  return {
+    scrubCredentials: config.scrubCredentials === true,
+    passthrough: [...(config.passthrough ?? [])],
+  };
 }
 
 /**
@@ -114,30 +130,66 @@ export function shouldScrubEnvVar(name: string): boolean {
  */
 export const SYNTHESIZED_NODE_ENV_MARKER = 'GTH_SYNTHESIZED_NODE_ENV';
 
+/** What {@link buildCommandEnv} produced for one spawn. */
+export interface CommandEnv {
+  /** The environment to hand to `spawn`. */
+  env: NodeJS.ProcessEnv;
+  /**
+   * Names of the credential variables removed by scrubbing, sorted, in the source's own casing.
+   * Empty when scrubbing is off. Never includes the synthesised `NODE_ENV` or its marker, which are
+   * not credentials. Names only — never a value.
+   */
+  removed: string[];
+}
+
 /**
- * Build the child environment for a spawned shell command: a copy of the parent
- * env with LLM/cloud credentials removed. Defaults to the live `process.env`
- * (via systemUtils); a source can be injected for testing.
+ * Build the environment for a spawned command from the parent env (the live `process.env` via
+ * systemUtils by default; a source can be injected for testing).
  *
- * Also drops a `NODE_ENV` we synthesized ourselves (see
- * {@link SYNTHESIZED_NODE_ENV_MARKER}). Our reason for setting it — picking
- * React's production build for the Ink renderer — has nothing to do with the
- * commands the agent runs, and `NODE_ENV=production` changes real behaviour in a
- * child: it makes `npm install` skip devDependencies, and flips framework build
- * and logging defaults. Inheriting it would mean a shell tool invocation behaved
- * differently depending on whether the user happened to be in the TUI.
- * An operator-set `NODE_ENV` has no marker and is passed through untouched.
+ * In EVERY configuration it drops a `NODE_ENV` we synthesized ourselves (see
+ * {@link SYNTHESIZED_NODE_ENV_MARKER}) along with the marker. Our reason for setting it — picking
+ * React's production build for the Ink renderer — has nothing to do with the commands the agent
+ * runs, and `NODE_ENV=production` changes real behaviour in a child: it makes `npm install` skip
+ * devDependencies, and flips framework build and logging defaults. Inheriting it would mean a shell
+ * tool invocation behaved differently depending on whether the user happened to be in the TUI. An
+ * operator-set `NODE_ENV` has no marker and is passed through untouched. This drop is not governed
+ * by `policy`: turning scrubbing off must not bring the synthesised value back.
+ *
+ * With `policy.scrubCredentials` on, it also removes every variable {@link shouldScrubEnvVar}
+ * selects and reports their names in `removed`.
  */
-export function buildScrubbedEnv(source: NodeJS.ProcessEnv = processEnv): NodeJS.ProcessEnv {
+export function buildCommandEnv(
+  policy: CommandEnvPolicy = DEFAULT_COMMAND_ENV_POLICY,
+  source: NodeJS.ProcessEnv = processEnv
+): CommandEnv {
   const synthesizedNodeEnv = Boolean(source[SYNTHESIZED_NODE_ENV_MARKER]);
-  const scrubbed: NodeJS.ProcessEnv = {};
+  const env: NodeJS.ProcessEnv = {};
+  const removed: string[] = [];
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    if (shouldScrubEnvVar(key)) continue;
     // The marker is ours and means nothing to a child, so it never travels.
     if (key === SYNTHESIZED_NODE_ENV_MARKER) continue;
     if (key === 'NODE_ENV' && synthesizedNodeEnv) continue;
-    scrubbed[key] = value;
+    if (policy.scrubCredentials && shouldScrubEnvVar(key, policy.passthrough)) {
+      removed.push(key);
+      continue;
+    }
+    env[key] = value;
   }
-  return scrubbed;
+  removed.sort();
+  return { env, removed };
+}
+
+/**
+ * The one line a failed command's tool result carries when scrubbing removed variables from its
+ * environment, or `undefined` when nothing was removed (scrubbing off, or nothing matched). It
+ * names the variables and the setting, never a value, so a command that failed for want of a key
+ * says why instead of surfacing only the child's own error about the wrong layer.
+ */
+export function describeRemovedOnFailure(removed: ReadonlyArray<string>): string | undefined {
+  if (removed.length === 0) return undefined;
+  return (
+    `Environment: commandEnv.scrubCredentials removed ${removed.join(', ')} from this ` +
+    "command's environment; if it needs one of them, add the name to commandEnv.passthrough."
+  );
 }

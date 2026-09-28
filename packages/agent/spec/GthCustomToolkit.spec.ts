@@ -34,7 +34,7 @@ const systemUtilsMock = {
 };
 // EXT-42: partial mock (spread over the real module) so the terminal handles stay stubbed while the
 // REAL `env` / `getCurrentWorkDir` survive — GthCustomToolkit now reaches them via the shared
-// buildScrubbedEnv() / getShellWorkDir() helpers. A full replacement would drop those exports and
+// buildCommandEnv() / getShellWorkDir() helpers. A full replacement would drop those exports and
 // break the scrub/cwd path (the same importOriginal pattern GthDevToolkit.shell.integration uses).
 vi.mock('#src/utils/systemUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#src/utils/systemUtils.js')>();
@@ -660,10 +660,11 @@ describe('GthCustomToolkit', () => {
       );
     });
 
-    it('EXT-42: spawns with the scrubbed env, the shared work dir, and a detached process group', async () => {
+    it('EXT-42 / EXT-126: spawns with a built env copy, the shared work dir, and a detached process group; by default credentials pass', async () => {
       const { getShellWorkDir } = await import('#src/tools/shell/workDir.js');
-      // A credential-shaped var in the PARENT env must NOT reach the child; a generic var must.
-      process.env.EXT42_MOCK_SECRET = 'nope-should-be-scrubbed';
+      // EXT-126: scrubbing is opt-in, so with the default toolkit a credential-shaped var in the
+      // PARENT env DOES reach the child, alongside a generic var.
+      process.env.EXT42_MOCK_SECRET = 'fixture-inherited-by-default';
       process.env.EXT42_MOCK_KEEP = 'keep-me';
       try {
         await toolkit['executeCommand']('echo test', 'test_tool');
@@ -683,13 +684,30 @@ describe('GthCustomToolkit', () => {
         const opts = childProcessMock.spawn.mock.calls.at(-1)![1] as {
           env: NodeJS.ProcessEnv;
         };
-        // The env is the SCRUBBED copy from buildScrubbedEnv, not the raw parent env object.
+        // The env is the copy from buildCommandEnv, not the raw parent env object.
         expect(opts.env).toBeDefined();
         expect(opts.env).not.toBe(process.env);
-        // Credential (matches the `_SECRET` wildcard sweep) is gone; a generic keeper survives.
-        // NB: buildScrubbedEnv returns a plain, case-SENSITIVE object keyed by the parent env's
+        // NB: buildCommandEnv returns a plain, case-SENSITIVE object keyed by the parent env's
         // original casing, so we assert a keeper whose name-case we control (EXT42_MOCK_KEEP) rather
         // than PATH — on Windows the parent key is `Path`, so `opts.env.PATH` would be undefined.
+        expect(opts.env.EXT42_MOCK_SECRET).toBe('fixture-inherited-by-default');
+        expect(opts.env.EXT42_MOCK_KEEP).toBe('keep-me');
+      } finally {
+        delete process.env.EXT42_MOCK_SECRET;
+        delete process.env.EXT42_MOCK_KEEP;
+      }
+    });
+
+    it('EXT-126: with commandEnv.scrubCredentials on, the credential is removed and a generic var survives', async () => {
+      process.env.EXT42_MOCK_SECRET = 'fixture-should-be-scrubbed';
+      process.env.EXT42_MOCK_KEEP = 'keep-me';
+      try {
+        const scrubbing = new GthCustomToolkit({}, { scrubCredentials: true, passthrough: [] });
+        await scrubbing['executeCommand']('echo test', 'test_tool');
+
+        const opts = childProcessMock.spawn.mock.calls.at(-1)![1] as {
+          env: NodeJS.ProcessEnv;
+        };
         expect(opts.env.EXT42_MOCK_SECRET).toBeUndefined();
         expect(opts.env.EXT42_MOCK_KEEP).toBe('keep-me');
       } finally {

@@ -843,6 +843,26 @@ run below `bypass`, whatever these entries say):
 }
 ```
 
+## What an approved command can see
+
+Approval decides whether a command runs. It does not decide what the command can read once it runs.
+**By default, a command the agent runs inherits Gaunt Sloth's environment unchanged, API keys and
+tokens included.** That lets a command that runs `gth` itself, or an eval against a live model,
+find its keys. It also means an approved `env`, `printenv` or crash dump puts those keys into the
+tool result, which is sent to the model provider and saved in session history.
+
+To keep credentials out of commands the agent runs, turn scrubbing on and name what a command may
+still see:
+
+```json
+{ "commandEnv": { "scrubCredentials": true, "passthrough": ["GH_TOKEN"] } }
+```
+
+With scrubbing on, a command that exits non-zero gets one extra line in its result naming the
+variables that were removed, so a missing key is visible at once. What counts as a credential, and
+the rest of the setting, is in
+[Tools configuration](../configuration/tools.md#a-spawned-commands-environment-commandenv).
+
 ## Examples
 
 ```json

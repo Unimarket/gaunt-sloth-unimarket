@@ -23,9 +23,14 @@ import {
 import { emitToolOutput } from '@gaunt-sloth/core/core/toolOutputChannel.js';
 import { createInterface, stdin, stdout } from '@gaunt-sloth/core/utils/systemUtils.js';
 // EXT-42: reuse GthDevToolkit's OWN spawn-hardening helpers so the two toolkits share one
-// implementation and cannot drift. `buildScrubbedEnv`/`getShellWorkDir` are the shell helpers the
+// implementation and cannot drift. `buildCommandEnv`/`getShellWorkDir` are the shell helpers the
 // dev toolkit imports; `killProcessGroup` is exported from GthDevToolkit itself. Do NOT re-implement.
-import { buildScrubbedEnv } from '#src/tools/shell/env.js';
+import {
+  buildCommandEnv,
+  describeRemovedOnFailure,
+  DEFAULT_COMMAND_ENV_POLICY,
+  type CommandEnvPolicy,
+} from '#src/tools/shell/env.js';
 import { getShellWorkDir, resolveShellCwd } from '#src/tools/shell/workDir.js';
 import { killProcessGroup } from '#src/tools/GthDevToolkit.js';
 
@@ -49,10 +54,19 @@ function createCustomTool<T extends z.ZodSchema>(
 export default class GthCustomToolkit extends BaseToolkit {
   tools: StructuredToolInterface[];
   private customTools: CustomToolsConfig;
+  /**
+   * EXT-126 — the resolved `commandEnv` setting, shared with the shell tool so the two spawn sites
+   * cannot disagree. Omitted → nothing scrubbed (the default).
+   */
+  private readonly commandEnv: CommandEnvPolicy;
 
-  constructor(customTools: CustomToolsConfig = {}) {
+  constructor(
+    customTools: CustomToolsConfig = {},
+    commandEnv: CommandEnvPolicy = DEFAULT_COMMAND_ENV_POLICY
+  ) {
     super();
     this.customTools = customTools;
+    this.commandEnv = commandEnv;
     this.tools = this.createTools();
   }
 
@@ -242,6 +256,9 @@ export default class GthCustomToolkit extends BaseToolkit {
       spawnCwd = getShellWorkDir();
     }
 
+    // EXT-126: the child env per the shared `commandEnv` setting (credentials kept by default).
+    const childEnv = buildCommandEnv(this.commandEnv);
+
     return new Promise((resolve, reject) => {
       const child = spawn(command, {
         shell: true,
@@ -265,11 +282,10 @@ export default class GthCustomToolkit extends BaseToolkit {
         // killProcessGroup (negative pid), not just the shell. No-op/harmful on Windows, which uses
         // taskkill /T inside that shared helper. Mirrors GthDevToolkit's `run_shell_command` exactly.
         detached: process.platform !== 'win32',
-        // EXT-42 (headline, security): child env with LLM/cloud credentials removed via the shared
-        // buildScrubbedEnv(). Without this a user-defined custom tool that shells out inherits the
-        // RAW parent env and can leak API keys / secrets to the subprocess and its logs. Closes the
-        // parity gap with the agent's own `run_shell_command`, which already gets a scrubbed env.
-        env: buildScrubbedEnv(),
+        // EXT-42 / EXT-126: the child env comes from the same builder `run_shell_command` uses, so
+        // one `commandEnv` setting governs both. Credentials are removed only when
+        // `commandEnv.scrubCredentials` is on; the synthesised NODE_ENV is dropped either way.
+        env: childEnv.env,
       });
 
       let output = '';
@@ -344,12 +360,15 @@ export default class GthCustomToolkit extends BaseToolkit {
               `\n\nCommand '${command}' completed successfully`
           );
         } else {
+          // EXT-126: with scrubbing on, one extra line names what was removed (names only).
+          const scrubNote = describeRemovedOnFailure(childEnv.removed);
           resolve(
             `Executing '${command}'...\n\n` +
               `<COMMAND_OUTPUT>\n` +
               output +
               `</COMMAND_OUTPUT>\n` +
-              `\n\nCommand '${command}' exited with code ${code}`
+              `\n\nCommand '${command}' exited with code ${code}` +
+              (scrubNote ? `\n${scrubNote}` : '')
           );
         }
       });

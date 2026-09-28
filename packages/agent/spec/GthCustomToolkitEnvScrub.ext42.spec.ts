@@ -2,42 +2,44 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { CommandEnvPolicy } from '#src/tools/shell/env.js';
 
 /**
- * EXT-42 (headline, security) — real-spawn acceptance gate for the custom-tool env scrub.
- *
- * This is THE gate: QA-7's ollama smoke does NOT exercise custom-tool spawn scrubbing, so this
- * end-to-end test is the only thing proving the credential leak is closed. It must therefore be
- * airtight and FUNCTIONAL — assert the secret is absent from the actual spawned child, not just from
- * a spawn-options object shape (the object-shape check lives in GthCustomToolkit.spec.ts).
+ * EXT-42 / EXT-126 — real-spawn acceptance gate for the custom-tool child environment.
  *
  * Like GthCustomToolkitSpawnStdin.spec.ts (and unlike GthCustomToolkit.spec.ts, which mocks
  * child_process wholesale), this spawns a REAL child so it exercises the actual `env` spawn option
- * produced by buildScrubbedEnv(). A fixture secret is planted in the PARENT env
- * (`process.env.FIXTURE_SECRET`); the probe echoes its OWN environment; the fixture must be ABSENT
- * from the child (present in parent → absent in child = parity with GthDevToolkit's scrubbed shell).
+ * produced by buildCommandEnv(). Fixture secrets are planted in the PARENT env; the probe echoes its
+ * OWN environment; each case asserts what the child actually received.
  *
- * The `_SECRET` suffix is load-bearing: buildScrubbedEnv strips it via its wildcard sweep
- * (`/_SECRET$/i`). A name like `FIXTURE_KEY` would NOT match and would give a FALSE PASS, so the
- * probe deliberately reads a `_SECRET`-suffixed name.
+ * EXT-126 made scrubbing opt-in, so the matrix is: scrubbing off (the default) inherits the
+ * fixture, scrubbing on removes it, and a passthrough list keeps exactly the named variable while
+ * removing the rest. Both fixture names end in a credential ending (`SECRET`, `TOKEN`), so absence
+ * under scrubbing is a scrub rather than a name the sweep never considered.
  *
  * `executeCommand` is called directly (as in GthCustomToolkitSpawnStdin.spec.ts) to bypass the
- * parameter validator — the scrub is a spawn-time property independent of the build/validate path.
+ * parameter validator — the env is a spawn-time property independent of the build/validate path.
  */
-describe('GthCustomToolkit executeCommand child env scrub (EXT-42, real spawn)', () => {
+describe('GthCustomToolkit executeCommand child env (EXT-42 / EXT-126, real spawn)', () => {
   let tmpDir: string;
   let probeScript: string;
 
+  const SECRET_VALUE = 'fixture-secret-value-EXT126';
+  const TOKEN_VALUE = 'fixture-token-value-EXT126';
+
   beforeAll(() => {
-    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'gth-ext42-env-'));
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), 'gth-ext126-env-'));
     probeScript = path.join(tmpDir, 'env-probe.cjs');
-    // Echo the fixture secret's value (empty when scrubbed) and a sentinel proving a generic var
-    // (PATH) survived the scrub — so a too-aggressive scrub that nuked the whole env can't pass.
+    // Echo both fixtures (empty when removed) and a sentinel proving a generic var (PATH) survived,
+    // so a builder that nuked the whole env can't pass. An optional argv exit code lets a case
+    // exercise the non-zero path.
     writeFileSync(
       probeScript,
       [
-        "process.stdout.write('FIXTURE=[' + (process.env.FIXTURE_SECRET || '') + ']');",
+        "process.stdout.write('SECRET=[' + (process.env.EXT126_FIXTURE_SECRET || '') + ']');",
+        "process.stdout.write('|TOKEN=[' + (process.env.EXT126_FIXTURE_TOKEN || '') + ']');",
         "process.stdout.write('|PATH_PRESENT=' + (process.env.PATH ? 'yes' : 'no'));",
+        'process.exit(Number(process.argv[2] || 0));',
         '',
       ].join('\n')
     );
@@ -48,36 +50,78 @@ describe('GthCustomToolkit executeCommand child env scrub (EXT-42, real spawn)',
   });
 
   afterEach(() => {
-    delete process.env.FIXTURE_SECRET;
+    delete process.env.EXT126_FIXTURE_SECRET;
+    delete process.env.EXT126_FIXTURE_TOKEN;
   });
 
-  it('scrubs a fixture secret from the child env (present in parent → absent in child)', async () => {
+  const runProbe = async (policy: CommandEnvPolicy | undefined, exitCode = 0): Promise<string> => {
     const { subscribeToolOutput } = await import('@gaunt-sloth/core/core/toolOutputChannel.js');
     const { default: GthCustomToolkit } = await import('#src/tools/GthCustomToolkit.js');
 
-    const secret = 'sk-fixture-should-not-leak-EXT42';
-    process.env.FIXTURE_SECRET = secret;
-    // Sanity: the secret really IS in the PARENT env before we spawn — so absence in the child is a
-    // scrub, not a never-set no-op.
-    expect(process.env.FIXTURE_SECRET).toBe(secret);
+    process.env.EXT126_FIXTURE_SECRET = SECRET_VALUE;
+    process.env.EXT126_FIXTURE_TOKEN = TOKEN_VALUE;
 
-    const toolkit = new GthCustomToolkit({});
+    const toolkit =
+      policy === undefined ? new GthCustomToolkit({}) : new GthCustomToolkit({}, policy);
     // Keep the live notice/output chunks off the real console during the test.
     const unsubscribe = subscribeToolOutput(() => {});
     try {
       // Quote the path so a temp dir with spaces (or backslashes on Windows) survives the shell.
-      const result = await toolkit['executeCommand'](`node "${probeScript}"`, 'env_probe', 20);
-
-      // Headline: the fixture secret is GONE from the child's environment.
-      expect(result).toContain('FIXTURE=[]');
-      expect(result).not.toContain(secret);
-      // Guard against a too-aggressive scrub: PATH (generic, not a credential) must still reach the
-      // child so normal commands keep working.
-      expect(result).toContain('PATH_PRESENT=yes');
-      // Proof it ran to completion (not killed by the timeout).
-      expect(result).toContain('completed successfully');
+      return await toolkit['executeCommand'](`node "${probeScript}" ${exitCode}`, 'env_probe', 20);
     } finally {
       unsubscribe();
     }
+  };
+
+  it('scrubbing off (default): the child inherits the fixture credentials', async () => {
+    const result = await runProbe(undefined);
+    expect(result).toContain(`SECRET=[${SECRET_VALUE}]`);
+    expect(result).toContain(`TOKEN=[${TOKEN_VALUE}]`);
+    expect(result).toContain('PATH_PRESENT=yes');
+    expect(result).toContain('completed successfully');
+  }, 30_000);
+
+  it('scrubbing on: the fixture credentials are gone from the child (present in parent)', async () => {
+    const result = await runProbe({ scrubCredentials: true, passthrough: [] });
+    expect(process.env.EXT126_FIXTURE_SECRET).toBe(SECRET_VALUE);
+    expect(result).toContain('SECRET=[]');
+    expect(result).toContain('TOKEN=[]');
+    expect(result).not.toContain(SECRET_VALUE);
+    expect(result).not.toContain(TOKEN_VALUE);
+    expect(result).toContain('PATH_PRESENT=yes');
+    expect(result).toContain('completed successfully');
+  }, 30_000);
+
+  it('scrubbing on with passthrough: keeps exactly the named variable, removes the rest', async () => {
+    const result = await runProbe({
+      scrubCredentials: true,
+      passthrough: ['ext126_fixture_token'],
+    });
+    expect(result).toContain('SECRET=[]');
+    expect(result).toContain(`TOKEN=[${TOKEN_VALUE}]`);
+    expect(result).toContain('PATH_PRESENT=yes');
+  }, 30_000);
+
+  it('scrubbing on: a non-zero exit names the removed variables, never their values', async () => {
+    const result = await runProbe({ scrubCredentials: true, passthrough: [] }, 3);
+    expect(result).toContain('exited with code 3');
+    const line = result.split('\n').find((l) => l.includes('commandEnv.scrubCredentials'));
+    expect(line).toBeDefined();
+    expect(line).toContain('EXT126_FIXTURE_SECRET');
+    expect(line).toContain('EXT126_FIXTURE_TOKEN');
+    expect(result).not.toContain(SECRET_VALUE);
+    expect(result).not.toContain(TOKEN_VALUE);
+  }, 30_000);
+
+  it('scrubbing off: a non-zero exit carries no scrub line', async () => {
+    const result = await runProbe(undefined, 3);
+    expect(result).toContain('exited with code 3');
+    expect(result).not.toContain('commandEnv.scrubCredentials');
+  }, 30_000);
+
+  it('scrubbing on: a clean exit carries no scrub line', async () => {
+    const result = await runProbe({ scrubCredentials: true, passthrough: [] });
+    expect(result).toContain('completed successfully');
+    expect(result).not.toContain('commandEnv.scrubCredentials');
   }, 30_000);
 });

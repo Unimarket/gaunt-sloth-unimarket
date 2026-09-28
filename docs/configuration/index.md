@@ -36,7 +36,7 @@ and tune. From there, follow the page for whatever you want to set up:
 | Page | What it covers |
 |---|---|
 | [Providers](providers.md) | Per-provider setup (Anthropic, Vertex AI, OpenAI, Groq, Ollama, …) and the model-identity prompt. |
-| [Tools](tools.md) | Built-in tools, the shell tool, content search, custom tools, middleware, and the allow-list. |
+| [Tools](tools.md) | Built-in tools, the shell tool, content search, custom tools, what a spawned command's environment contains (`commandEnv`), middleware, and the allow-list. |
 | [MCP servers](mcp.md) | Connecting MCP servers, including remote OAuth and TLS trust. |
 | [Content sources](content-sources.md) | Pulling review requirements from GitHub issues or Jira, and change-requirements discovery. |
 | [Prompts](prompts.md) | The `prompts` object — guidelines, review, system and the other prompt segments, and scoping them to paths. |

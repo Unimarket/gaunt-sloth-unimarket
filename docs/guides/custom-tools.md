@@ -112,6 +112,13 @@ Add `"timeout": <seconds>` to kill a command that runs too long. `customTools` w
 by default; set `commands.<cmd>.customTools` to override it for one command, or `false` to disable it
 there.
 
+The command inherits Gaunt Sloth's environment unchanged by default, API keys included, so a
+`customTools` entry that runs `gth` itself or calls a model API works without extra setup. It also
+means a command that prints its environment puts those keys into the tool result, which goes to the
+model provider and into session history. To remove credentials from the command's environment, set
+[`commandEnv.scrubCredentials`](../configuration/tools.md#a-spawned-commands-environment-commandenv)
+and list the variables the command still needs in `commandEnv.passthrough`.
+
 ## Examples
 
 ```bash

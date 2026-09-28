@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import type { CommandEnvPolicy } from '#src/tools/shell/env.js';
 
 // Keep terminal noise out of the test output but let env (real process.env)
 // flow through so the credential-scrub test is meaningful.
@@ -32,6 +33,8 @@ d('GthDevToolkit shell hardening (real spawn)', () => {
   afterEach(() => {
     delete process.env.GSLOTH_FAKE_ANTHROPIC_PROBE;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.EXT126_FIXTURE_SECRET;
+    delete process.env.EXT126_FIXTURE_TOKEN;
   });
 
   // Helper: invoke the private executeCommand with a given dev-tools config.
@@ -106,13 +109,67 @@ d('GthDevToolkit shell hardening (real spawn)', () => {
     expect(onDisk).toContain('line-2000-padding');
   }, 15_000);
 
-  it('scrubs a provider credential from the child env', async () => {
-    process.env.ANTHROPIC_API_KEY = 'sk-should-not-leak';
-    const result = await run('printf "KEY=[%s]" "$ANTHROPIC_API_KEY"', {
-      shell: { enabled: true, timeout: 5000 },
+  /** EXT-126: the same, with a resolved `commandEnv` policy handed to the toolkit. */
+  const runWithEnv = (command: string, commands: object, commandEnv?: CommandEnvPolicy) => {
+    const toolkit = new GthDevToolkit(commands, undefined, commandEnv);
+    return (
+      toolkit as unknown as { executeCommand(_c: string, _n: string): Promise<string> }
+    ).executeCommand(command, 'run_shell_command');
+  };
+
+  // EXT-126: scrubbing is opt-in. Fixture values only — never a real key.
+  const PROBE = 'printf "SECRET=[%s]|TOKEN=[%s]" "$EXT126_FIXTURE_SECRET" "$EXT126_FIXTURE_TOKEN"';
+  const shellOn = { shell: { enabled: true, timeout: 5000 } };
+
+  it('scrubbing off (default): a credential reaches the child env', async () => {
+    process.env.EXT126_FIXTURE_SECRET = 'fixture-secret-EXT126';
+    process.env.EXT126_FIXTURE_TOKEN = 'fixture-token-EXT126';
+    const result = await runWithEnv(PROBE, shellOn);
+    expect(result).toContain('SECRET=[fixture-secret-EXT126]|TOKEN=[fixture-token-EXT126]');
+  }, 10_000);
+
+  it('scrubbing on: a credential is removed from the child env', async () => {
+    process.env.EXT126_FIXTURE_SECRET = 'fixture-secret-EXT126';
+    process.env.EXT126_FIXTURE_TOKEN = 'fixture-token-EXT126';
+    const result = await runWithEnv(PROBE, shellOn, { scrubCredentials: true, passthrough: [] });
+    expect(result).toContain('SECRET=[]|TOKEN=[]');
+    expect(result).not.toContain('fixture-secret-EXT126');
+    expect(result).not.toContain('fixture-token-EXT126');
+  }, 10_000);
+
+  it('scrubbing on with passthrough: keeps exactly the named variable, removes the rest', async () => {
+    process.env.EXT126_FIXTURE_SECRET = 'fixture-secret-EXT126';
+    process.env.EXT126_FIXTURE_TOKEN = 'fixture-token-EXT126';
+    const result = await runWithEnv(PROBE, shellOn, {
+      scrubCredentials: true,
+      passthrough: ['EXT126_FIXTURE_TOKEN'],
     });
-    expect(result).toContain('KEY=[]');
-    expect(result).not.toContain('sk-should-not-leak');
+    expect(result).toContain('SECRET=[]|TOKEN=[fixture-token-EXT126]');
+  }, 10_000);
+
+  it('scrubbing on: a non-zero exit names the removed variables, never their values', async () => {
+    const { ShellCommandFailedError } = await import('#src/tools/GthDevToolkit.js');
+    process.env.EXT126_FIXTURE_SECRET = 'fixture-secret-EXT126';
+    const error = await runWithEnv(`${PROBE}; exit 4`, shellOn, {
+      scrubCredentials: true,
+      passthrough: [],
+    }).catch((e) => e as InstanceType<typeof ShellCommandFailedError>);
+    expect(error).toBeInstanceOf(ShellCommandFailedError);
+    expect(error.exitCode).toBe(4);
+    const line = error.output.split('\n').find((l) => l.includes('commandEnv.scrubCredentials'));
+    expect(line).toBeDefined();
+    expect(line).toContain('EXT126_FIXTURE_SECRET');
+    expect(error.output).not.toContain('fixture-secret-EXT126');
+  }, 10_000);
+
+  it('scrubbing off: a non-zero exit carries no scrub line', async () => {
+    const { ShellCommandFailedError } = await import('#src/tools/GthDevToolkit.js');
+    const error = await runWithEnv('exit 4', shellOn).catch(
+      (e) => e as InstanceType<typeof ShellCommandFailedError>
+    );
+    expect(error).toBeInstanceOf(ShellCommandFailedError);
+    expect(error.output).toContain('exited with code 4');
+    expect(error.output).not.toContain('commandEnv.scrubCredentials');
   }, 10_000);
 
   it('preserves generic env (PATH) for the child', async () => {
