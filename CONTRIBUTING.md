@@ -117,7 +117,13 @@ routing those scopes to localhost:
 
 ### Release workflow
 
-`packages/core/package.json` is the single source of truth for the synced version:
+`packages/core/package.json` is the single source of truth for the synced version.
+
+**Choosing the increment.** A release that only fixes things is a patch. Anything more — a new
+feature, a changed default, a removed or renamed export, a config change an existing file has to
+follow — is a minor, and that includes breaking changes. The major version is not used to signal
+compatibility; it is kept for marking a significant milestone. So every breaking change is called
+out as breaking in its `release-notes/` entry, because the version number will not say so.
 
 ```bash
 # Bump like `npm version` — patch | minor | major or an explicit version;
