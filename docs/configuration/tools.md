@@ -713,6 +713,8 @@ issue lookups run `gh` from the `gth` process itself, so they keep working witho
 
 - `passthrough` takes **exact** variable names, matched case-insensitively. Wildcards are rejected
   when the config loads, so every name a spawned command keeps is written out.
+- A project config's `passthrough` list replaces the global config's list rather than adding to it,
+  so repeat any global names you still want. `scrubCredentials` can be set in either config.
 - The match is deliberately broad, so it can catch a harmless name, such as a public
   `…_PUBLISHABLE_KEY`. When a spawned command exits non-zero with scrubbing on, its result carries one
   extra line naming the variables that were removed (names only, never values). Add the one it

@@ -31,8 +31,6 @@ d('GthDevToolkit shell hardening (real spawn)', () => {
   });
 
   afterEach(() => {
-    delete process.env.GSLOTH_FAKE_ANTHROPIC_PROBE;
-    delete process.env.ANTHROPIC_API_KEY;
     delete process.env.EXT126_FIXTURE_SECRET;
     delete process.env.EXT126_FIXTURE_TOKEN;
   });

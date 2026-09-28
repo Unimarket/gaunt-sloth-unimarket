@@ -107,20 +107,24 @@ does stop them. Measured over a corpus of commands that should not run unattende
 need no model at all stop 17 more of them at Assisted and Auto than at Bypass — before the rater has
 been asked anything.
 
-## The two things that are not text checks
+## Controls that are not text checks
 
-Two controls inside Gaunt Sloth remove a capability instead of reading a string:
+Some controls remove a capability instead of reading a string. By default there is one:
 
 - The **file tools refuse a path outside the folder Gaunt Sloth is running in**, at every mode,
   Bypass included. There is currently no way to widen that boundary: `gth exec --allow-dir <path>`
   once did, for the deepagents backend that has since been removed, and now warns and does nothing.
-- The **LLM and cloud provider keys Gaunt Sloth holds are stripped from the environment** of any
-  command it runs, so the environment is not a route to them — but a key you have written into a
-  config file or a `.env` is a file on disk like any other, and an approved command can read it.
-  A `GITHUB_TOKEN` is deliberately left in place, because Gaunt Sloth's own review workflows shell
-  out to `gh`.
 
-Each of those closes one route. Neither of them bounds the agent, and the difference is the whole
+**Your credentials are not one of them by default.** A command Gaunt Sloth runs, through the shell
+tool or a custom tool, inherits its environment unchanged, API keys and tokens included. An approved
+`env`, `printenv` or crash dump therefore puts those keys into the tool result, which is sent to the
+model provider and saved in session history. To close that route, set
+[`commandEnv.scrubCredentials`](../configuration/tools.md#a-spawned-commands-environment-commandenv):
+credential-shaped variables, `GITHUB_TOKEN` included, are then removed from every spawned command's
+environment, except the ones you name in `commandEnv.passthrough`. Even then, a key you have written
+into a config file or a `.env` is a file on disk like any other, and an approved command can read it.
+
+Each of these closes one route. None of them bounds the agent, and the difference is the whole
 point. Take one path outside that folder, and write to it two ways:
 
 ```
