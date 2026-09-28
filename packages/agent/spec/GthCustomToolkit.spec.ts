@@ -21,6 +21,11 @@ vi.mock('#src/utils/consoleUtils.js', () => consoleUtilsMock);
 // Mock systemUtils
 const mockRlQuestion = vi.fn();
 const mockRlClose = vi.fn();
+// EXT-126: a FIXTURE parent env, never the real one. With scrubbing off by default the spawn options
+// captured by the child_process mock carry the whole parent env, and a failing
+// `toHaveBeenCalledWith` serialises those options — against the real env that would print this
+// machine's live keys into the test output.
+const mockEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/test' };
 const systemUtilsMock = {
   stdout: {
     write: vi.fn(),
@@ -31,11 +36,12 @@ const systemUtilsMock = {
     setRawMode: vi.fn(),
   },
   createInterface: vi.fn(),
+  env: mockEnv,
 };
 // EXT-42: partial mock (spread over the real module) so the terminal handles stay stubbed while the
-// REAL `env` / `getCurrentWorkDir` survive — GthCustomToolkit now reaches them via the shared
-// buildCommandEnv() / getShellWorkDir() helpers. A full replacement would drop those exports and
-// break the scrub/cwd path (the same importOriginal pattern GthDevToolkit.shell.integration uses).
+// REAL `getCurrentWorkDir` survives — GthCustomToolkit reaches it via the shared getShellWorkDir()
+// helper. A full replacement would drop those exports and break the cwd path (the same
+// importOriginal pattern GthDevToolkit.shell.integration uses). `env` is the fixture above.
 vi.mock('#src/utils/systemUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#src/utils/systemUtils.js')>();
   return { ...actual, ...systemUtilsMock };
@@ -664,8 +670,8 @@ describe('GthCustomToolkit', () => {
       const { getShellWorkDir } = await import('#src/tools/shell/workDir.js');
       // EXT-126: scrubbing is opt-in, so with the default toolkit a credential-shaped var in the
       // PARENT env DOES reach the child, alongside a generic var.
-      process.env.EXT42_MOCK_SECRET = 'fixture-inherited-by-default';
-      process.env.EXT42_MOCK_KEEP = 'keep-me';
+      mockEnv.EXT42_MOCK_SECRET = 'fixture-inherited-by-default';
+      mockEnv.EXT42_MOCK_KEEP = 'keep-me';
       try {
         await toolkit['executeCommand']('echo test', 'test_tool');
 
@@ -686,21 +692,21 @@ describe('GthCustomToolkit', () => {
         };
         // The env is the copy from buildCommandEnv, not the raw parent env object.
         expect(opts.env).toBeDefined();
-        expect(opts.env).not.toBe(process.env);
+        expect(opts.env).not.toBe(mockEnv);
         // NB: buildCommandEnv returns a plain, case-SENSITIVE object keyed by the parent env's
         // original casing, so we assert a keeper whose name-case we control (EXT42_MOCK_KEEP) rather
         // than PATH — on Windows the parent key is `Path`, so `opts.env.PATH` would be undefined.
         expect(opts.env.EXT42_MOCK_SECRET).toBe('fixture-inherited-by-default');
         expect(opts.env.EXT42_MOCK_KEEP).toBe('keep-me');
       } finally {
-        delete process.env.EXT42_MOCK_SECRET;
-        delete process.env.EXT42_MOCK_KEEP;
+        delete mockEnv.EXT42_MOCK_SECRET;
+        delete mockEnv.EXT42_MOCK_KEEP;
       }
     });
 
     it('EXT-126: with commandEnv.scrubCredentials on, the credential is removed and a generic var survives', async () => {
-      process.env.EXT42_MOCK_SECRET = 'fixture-should-be-scrubbed';
-      process.env.EXT42_MOCK_KEEP = 'keep-me';
+      mockEnv.EXT42_MOCK_SECRET = 'fixture-should-be-scrubbed';
+      mockEnv.EXT42_MOCK_KEEP = 'keep-me';
       try {
         const scrubbing = new GthCustomToolkit({}, { scrubCredentials: true, passthrough: [] });
         await scrubbing['executeCommand']('echo test', 'test_tool');
@@ -711,8 +717,8 @@ describe('GthCustomToolkit', () => {
         expect(opts.env.EXT42_MOCK_SECRET).toBeUndefined();
         expect(opts.env.EXT42_MOCK_KEEP).toBe('keep-me');
       } finally {
-        delete process.env.EXT42_MOCK_SECRET;
-        delete process.env.EXT42_MOCK_KEEP;
+        delete mockEnv.EXT42_MOCK_SECRET;
+        delete mockEnv.EXT42_MOCK_KEEP;
       }
     });
 

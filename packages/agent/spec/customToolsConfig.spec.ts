@@ -17,16 +17,20 @@ const consoleUtilsMock = {
 vi.mock('#src/utils/consoleUtils.js', () => consoleUtilsMock);
 
 // Mock systemUtils
+// EXT-126: a FIXTURE parent env, never the real one. With scrubbing off by default the spawn options
+// captured by the child_process mock carry the whole parent env, and a failing assertion that
+// serialises them would print this machine's live keys into the test output.
+const mockEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/test' };
 const systemUtilsMock = {
   stdout: {
     write: vi.fn(),
   },
   getCurrentWorkDir: vi.fn(() => '/test/project'),
+  env: mockEnv,
 };
-// EXT-42: partial mock (spread over the real module) so buildCommandEnv()'s real `env` — and the
-// stdin/createInterface the validation-override prompt uses — survive, while keeping the intentional
-// stdout + getCurrentWorkDir stubs. GthCustomToolkit now reaches `env`/work-dir through the shared
-// scrub/work-dir helpers; a full replacement would drop those exports and throw at spawn time.
+// EXT-42: partial mock (spread over the real module) so the stdin/createInterface the
+// validation-override prompt uses survive, while keeping the intentional stdout + getCurrentWorkDir
+// stubs and the fixture `env`. A full replacement would drop those exports and throw at spawn time.
 vi.mock('#src/utils/systemUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#src/utils/systemUtils.js')>();
   return { ...actual, ...systemUtilsMock };
@@ -423,19 +427,19 @@ describe('Custom Tools Configuration', () => {
     const customTools = { probe_tool: { command: 'echo probe', description: 'Probe' } };
 
     it('default config: both spawn sites inherit the credential', async () => {
-      process.env.EXT126_WIRING_SECRET = 'fixture-wiring';
+      mockEnv.EXT126_WIRING_SECRET = 'fixture-wiring';
       try {
         const { customEnv, shellEnv } = await invokeBoth(createMockConfig({ customTools }));
         expect(customEnv.EXT126_WIRING_SECRET).toBe('fixture-wiring');
         expect(shellEnv.EXT126_WIRING_SECRET).toBe('fixture-wiring');
       } finally {
-        delete process.env.EXT126_WIRING_SECRET;
+        delete mockEnv.EXT126_WIRING_SECRET;
       }
     });
 
     it('scrubCredentials on: both spawn sites drop the credential and honour passthrough', async () => {
-      process.env.EXT126_WIRING_SECRET = 'fixture-wiring';
-      process.env.EXT126_WIRING_TOKEN = 'fixture-kept';
+      mockEnv.EXT126_WIRING_SECRET = 'fixture-wiring';
+      mockEnv.EXT126_WIRING_TOKEN = 'fixture-kept';
       try {
         const { customEnv, shellEnv } = await invokeBoth(
           createMockConfig({
@@ -448,8 +452,8 @@ describe('Custom Tools Configuration', () => {
         expect(customEnv.EXT126_WIRING_TOKEN).toBe('fixture-kept');
         expect(shellEnv.EXT126_WIRING_TOKEN).toBe('fixture-kept');
       } finally {
-        delete process.env.EXT126_WIRING_SECRET;
-        delete process.env.EXT126_WIRING_TOKEN;
+        delete mockEnv.EXT126_WIRING_SECRET;
+        delete mockEnv.EXT126_WIRING_TOKEN;
       }
     });
   });
