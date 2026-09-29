@@ -1523,6 +1523,51 @@ describe('tui <App>', () => {
   });
 
   /**
+   * TUI-C94, REL-27 — **with a slash menu open mid-turn, `Esc` belongs to the menu.** It closes the
+   * menu and the turn keeps running; a second `Esc`, with the menu gone, is the abort. Both doors,
+   * because both publish "a menu owns the keyboard" through the same flag.
+   */
+  describe('Esc with a slash menu open mid-turn (TUI-C94, REL-27)', () => {
+    const blockingAgent = (onAbort: () => void): TuiAgent => ({
+      async *runTurn(_input, signal) {
+        yield { type: 'text', delta: 'working' };
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          signal.addEventListener('abort', () => {
+            onAbort();
+            resolve();
+          });
+        });
+      },
+    });
+
+    it.each([
+      ['the Ctrl+G chord menu', CTRL_G],
+      ['the typed "/" menu', '/'],
+    ])('closes %s without aborting the turn; a second Esc aborts', async (_door, opener) => {
+      let aborted = false;
+      const { stdin, frames, lastFrame, unmount } = render(
+        <App {...baseProps} agent={blockingAgent(() => (aborted = true))} initialMessage="run" />
+      );
+      await vi.waitFor(() => expect(frames.join('\n')).toContain('working'));
+
+      stdin.write(opener);
+      await vi.waitFor(() => expect(lastFrame()).toMatch(/❯/));
+
+      stdin.write(ESC);
+      await vi.waitFor(() => expect(lastFrame()).not.toMatch(/❯/));
+      // Give a wrongly-routed abort time to land before asserting it did not.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(aborted).toBe(false);
+
+      stdin.write(ESC);
+      await vi.waitFor(() => expect(aborted).toBe(true));
+
+      unmount();
+    });
+  });
+
+  /**
    * TUI-C79 — **Ctrl+C is a ladder, and the rungs are separate claims.**
    *
    * `render()` hands the key over (`exitOnCtrlC: false`), so `<App>` decides what it means: a draft

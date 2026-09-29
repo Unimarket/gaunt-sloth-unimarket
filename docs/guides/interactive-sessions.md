@@ -238,8 +238,8 @@ or a longer wait past 90 seconds ends the run with a `rate_limited` termination 
 Typing `/` only opens the menu on an empty line, so with `please refactor the fo` already in the
 prompt there is nothing to type it into. In the TUI, press **Ctrl+G** (**Ctrl+/** works too, on
 terminals that send it — macOS sends nothing for it) and the menu opens *above* your message
-instead. Type to filter, `↑`/`↓` to move, `Tab` to complete the highlighted name, Enter to run it,
-`Esc` to close. When more commands match than fit above your message the list scrolls with the
+instead. Type to filter, `↑`/`↓` to move, `Tab` to complete the highlighted name, Enter to run it.
+To close it, press `Esc`, press **Ctrl+G** again, or press Backspace with nothing typed in it. When more commands match than fit above your message the list scrolls with the
 highlight, and a dim `↓ 7 more` line says how many are out of view. What you type goes into the
 menu, not into the message: the message stays on screen
 untouched, and it comes back with the cursor where you left it once the command has run — including
@@ -247,10 +247,9 @@ after `/approvals`, which takes over the screen with its own picker while it run
 
 It works mid-turn as well, with the same rule as a typed command — the ones that are safe while the
 agent is working (`/approvals`, `/verbose`, `/debug`, `/model`, `/status`, `/autocompact`, …) run, and `/clear`,
-`/compact`, `/help`, `/exit` and `/quit` ask you to wait for the turn to finish. One thing to know before you
-open it there: while a reply is arriving, `Escape` stops the reply, and it does that as well as
-closing the menu. To leave the menu without stopping the turn, run one of the commands — or wait
-for the turn to end and then press `Esc`.
+`/compact`, `/help`, `/exit` and `/quit` ask you to wait for the turn to finish. Closing the menu
+never stops the reply: with the menu open, `Esc` only closes it. Press `Esc` again once it is gone
+to stop the turn.
 
 ## Writing a longer message
 

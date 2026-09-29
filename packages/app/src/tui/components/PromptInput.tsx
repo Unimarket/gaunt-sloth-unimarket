@@ -204,9 +204,12 @@ export type PromptDraftCarry = React.MutableRefObject<EditorState | null>;
  * exactly as `help` does, and a query PASTED while the menu is open is filtered by rather than
  * spliced into the message.
  *
- * **The chord OPENS the menu; it never closes it.** A toggle would make an even number of presses
- * indistinguishable from none — a shape this input family has twice made a test pass on a broken
- * tree (TUI-C58) — and `Esc` already closes it.
+ * **The menu has four exits, and none of them touches the message or a running turn** (REL-27):
+ * `Esc`, the chord pressed again, Backspace on an empty query, and running a command. The chord
+ * toggles because a user who opened the menu by accident reaches for the same keys to undo it. An
+ * even number of presses is then indistinguishable from none on screen, so a test of the chord
+ * must assert the open state between the presses, not only the end state (TUI-C58). `Esc` is safe
+ * mid-turn because `<App>` does not abort a turn while a menu owns the keyboard (TUI-C94).
  *
  * **It is not gated on a turn running.** `Ctrl+T` is, because Ink broadcasts every keypress to every
  * `useInput` subscriber with no way to stop propagation; here filtering IS the mechanism and there
@@ -587,10 +590,11 @@ export function PromptInput({
 
   useInput(
     (input, key) => {
-      // TUI-C51 — the chord, live in every state of the buffer and of the session. It only ever
-      // OPENS (see the component's doc comment); pressing it again restarts the query.
+      // TUI-C51 — the chord, live in every state of the buffer and of the session. REL-27 — it
+      // toggles: pressed with the menu open it closes it, leaving the message as it was. Read from
+      // the ref, so a second press in the same stdin chunk as the first sees the menu it opened.
       if (opensCommandMenu(input, key)) {
-        putCommandMenu({ query: '', index: 0, started: false });
+        putCommandMenu(commandMenuRef.current ? null : { query: '', index: 0, started: false });
         return;
       }
 
@@ -618,21 +622,21 @@ export function PromptInput({
           // arguments to type here, and a space would only narrow the list to nothing.
           if (list.length > 0)
             putCommandMenu({ query: list[highlighted].name, index: 0, started: true });
-        } else if (key.return) {
+        } else if (key.return || input === '\r' || input === '\n') {
+          // REL-27 — Enter is `\r` on most terminals but `\n` on some, which Ink names `'enter'`
+          // and leaves `key.return` unset (the same split `<PromptEditor>` binds explicitly); a
+          // `\n` is also not typed text, so without this branch it fell through and did nothing.
           // Nothing highlighted means nothing to run — the same rule <SelectList> applies to a
           // filter that matches no row. The menu stays open so the query can be corrected.
           if (list.length > 0) dispatchBesideDraft(list[highlighted].name);
         } else if (key.backspace || key.delete) {
-          // Nothing to trim is nothing to do. Running the update anyway would reset the highlight
-          // on a keystroke that changed nothing on screen, so a user who has arrowed down the list
-          // and then pressed Backspace once too often watches the selection jump back to the top
-          // with nothing to explain it.
-          if (open.query)
-            putCommandMenu({
-              query: open.query.slice(0, -1),
-              index: 0,
-              started: open.started,
-            });
+          // REL-27 — Backspace on an empty query closes the menu, the way it leaves the typed
+          // door: wiping the query and pressing once more is the reflex for "never mind", and it is
+          // the one exit that cannot reach the turn. Otherwise it trims one character and resets
+          // the highlight, as every other edit to the query does.
+          putCommandMenu(
+            open.query ? { query: open.query.slice(0, -1), index: 0, started: open.started } : null
+          );
         } else if (isTypedText(input, key)) {
           // The query is one line and holds no command name with a control character in it, so what
           // goes in is the event's text (`keyGuards.ts`), not the event.

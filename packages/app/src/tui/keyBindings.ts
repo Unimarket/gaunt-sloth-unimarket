@@ -82,7 +82,8 @@ export const TUI_KEY_BINDINGS: readonly KeyBindingGroup[] = [
         // a user cannot find by pressing keys at random — so it says what it is FOR, not just what
         // it opens. `Ctrl+/` is named second because it emits nothing at all on macOS.
         keys: 'Ctrl+G, or Ctrl+/',
-        description: 'open that menu without disturbing a message you have started writing',
+        description:
+          'open that menu without disturbing a message you have started writing (again to close)',
       },
       { keys: 'Tab', description: 'complete the highlighted command' },
       {
@@ -91,7 +92,9 @@ export const TUI_KEY_BINDINGS: readonly KeyBindingGroup[] = [
         keys: 'Enter',
         description: 'send the line — or run the highlighted command, while the menu is open',
       },
-      { keys: 'Esc', description: 'dismiss the menu' },
+      // Said here because the same key stops a turn everywhere else: with a menu open it only
+      // closes the menu, and the turn keeps going (TUI-C94, REL-27).
+      { keys: 'Esc', description: 'dismiss the menu — a running turn keeps going' },
       {
         // The one binding here a user cannot discover by pressing something: neither spelling
         // shows itself. `\` is a character they already type for other reasons and nothing on
