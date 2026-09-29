@@ -233,6 +233,23 @@ describe('[[EXT-205]] a stop reason per streamed model message', () => {
       expect(agent.getTerminationReason()).toBeNull();
     });
 
+    it('splits on a change of graph node when the chunks carry no id', async () => {
+      const agent = agentStreaming([
+        [geminiChunk(undefined, 'cut '), ANSWER_META],
+        [geminiChunk(undefined, '', 'MAX_TOKENS'), ANSWER_META],
+        [geminiChunk(undefined, ''), RATING_META],
+        [geminiChunk(undefined, '', 'STOP'), RATING_META],
+      ]);
+
+      await runStringPath(agent);
+
+      expect(tokens(agent)).toEqual(['max_tokens', 'stop']);
+      expect(agent.getTerminationReason()).toMatchObject({
+        site: 'agent.stream-stop-metadata',
+        category: 'output_truncated',
+      });
+    });
+
     it('does not split a message whose chunks carry no id and no node', async () => {
       const agent = agentStreaming([
         [geminiChunk(undefined, 'a '), {}],
