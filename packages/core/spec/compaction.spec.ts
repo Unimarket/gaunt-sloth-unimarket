@@ -500,12 +500,15 @@ describe('GS2-23 compactMessages — the compacted shape through the real provid
     // The pending user turn is still the last thing the model sees — no silent prefill.
     expect(payload.messages[payload.messages.length - 1].role).toBe('user');
 
-    // CONTROL 1 — the shape this mechanism avoids: a summary carried as a mid-list SystemMessage
-    // is rejected by this converter, which is why the summary is a HumanMessage.
+    // CONTROL 1 — the shape this mechanism avoids: this converter hoists a summary carried as a
+    // mid-list SystemMessage into the top-level system field beside the system prompt and removes
+    // it from the conversation (langchainjs PR #11669), which is why the summary is a HumanMessage.
     const asSystem = [messages[0], new SystemMessage('summary'), ...messages.slice(2)];
-    expect(() => _convertMessagesToAnthropicPayload(asSystem)).toThrow(
-      'System messages are only permitted as the first passed message.'
-    );
+    const asSystemPayload = _convertMessagesToAnthropicPayload(asSystem);
+    expect(JSON.stringify(asSystemPayload.system)).toContain('summary');
+    expect(
+      asSystemPayload.messages.some((m) => JSON.stringify(m.content).includes('summary'))
+    ).toBe(false);
     // CONTROL 2 — a split pair reaches the wire as a tool_result with no tool_use before it, which
     // the check above would catch: the assertion can fail.
     const split = messages.filter(
