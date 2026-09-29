@@ -62,6 +62,11 @@ import {
   type RefusalInfo,
 } from '#src/core/refusal.js';
 import {
+  isMiddlewareHookNode,
+  streamNodeOf,
+  TurnMessageReasons,
+} from '#src/core/modelMessageFold.js';
+import {
   terminationReason,
   type GthFinishReasonObservation,
   type GthTerminationReason,
@@ -1309,13 +1314,27 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
           // terminal-but-clear instead of routing an empty streamed turn into the retry.
           let refusalInfo: RefusalInfo | null = null;
           // EXT-41: belt-and-suspenders — also concat the AI chunks so a refusal can be read off
-          // the FINAL aggregated message's stop/finish reason, not only a per-chunk one. Some
-          // providers surface the reason only on the assembled message (or split it across chunks
-          // that concat into it); without this fallback such a refusal would be swallowed by the
+          // the assembled message's stop/finish reason, not only a per-chunk one. Some providers
+          // surface the reason only on the assembled message (or split it across chunks that
+          // concat into it); without this fallback such a refusal would be swallowed by the
           // empty-response retry, making the EXT-37 surfacing cosmetic on the DEFAULT streaming
-          // surface. Reset at each tool round (below) so a prior round's reason can't concatenate
-          // with the final turn's (mirrors processEventStream's per-round reset).
-          let aggregatedChunk: AIMessageChunk | null = null;
+          // surface.
+          //
+          // [[EXT-205]] — the aggregate is ONE PER MODEL MESSAGE, not one per tool round. A
+          // middleware hook can call the model with no ToolMessage after it: the review rating
+          // call runs from `review-rate.after_agent` straight after the answer, so a per-round
+          // aggregate concatenated the two messages' reasons (`stopstop`; `max_tokensstop` for a
+          // truncated review, which no reader recognises). A bare reset when the message id
+          // changes would not fix it either: the last aggregate would then be the rating call's,
+          // and the answer's own reason would never be read. So each message is recorded as it
+          // finishes (one finish-reason entry per message, an absent reason logged as absent),
+          // and the turn is classified from the last message that is NOT a middleware hook's and
+          // was not followed by a tool round — the answer, not the rating call. The boundary rule
+          // and the choice of message are argued in `modelMessageFold.ts`; the typed-event path
+          // uses the same tracker so the two cannot drift.
+          const messageReasons = new TurnMessageReasons((message) =>
+            noteFinishReason('stream', message)
+          );
 
           for await (const [chunk, _metadata] of stream) {
             debugLogObject('Stream chunk', { chunk, _metadata });
@@ -1323,17 +1342,14 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
             // the run tally before the text-only handling below.
             recordRunStats(chunk);
             // EXT-37: first refusal signal wins; keep scanning chunks for text/binary as normal.
-            if (!refusalInfo) {
+            // [[EXT-205]] — a middleware hook's own model call is not the answer, so a refusal on
+            // it (the review rating call) must not be surfaced as the model declining the turn.
+            // Same rule as the classification below, so the two refusal readers and the
+            // truncation reader all read the same messages.
+            if (!refusalInfo && !isMiddlewareHookNode(streamNodeOf(_metadata))) {
               refusalInfo = detectRefusal(chunk);
             }
-            // EXT-41: fold AI chunks into an aggregate for the aggregate-level refusal fallback,
-            // resetting at tool-round boundaries so a prior round's stop/finish reason can't bleed
-            // into the final turn's aggregate.
-            if (AIMessageChunk.isInstance(chunk)) {
-              aggregatedChunk = aggregatedChunk ? aggregatedChunk.concat(chunk) : chunk;
-            } else if (chunk instanceof ToolMessage) {
-              aggregatedChunk = null;
-            }
+            messageReasons.observe(chunk, _metadata);
             // TUI-C30: fold the chunk into the plain-surface tool indication (renders each
             // completed call when its ToolMessage arrives; a no-op for plain text chunks).
             toolIndication.observe(chunk);
@@ -1378,20 +1394,21 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
               statusUpdate(StatusLevel.SUCCESS, successMessage);
             }
           }
+          // [[EXT-159]] — the provider's own word on why each message stopped, recorded before
+          // either branch below decides what to make of it, so the raw fact is kept on the
+          // refusal path as well as the ordinary one. [[EXT-205]] — `end()` records the last open
+          // message and hands back the one that classifies the turn.
+          const turnMessage = messageReasons.end();
           // EXT-41: aggregate-level fallback — if no per-chunk metadata flagged a refusal, inspect
-          // the FINAL aggregated message's stop/finish reason. Catches providers that expose the
+          // the answer message's assembled stop/finish reason. Catches providers that expose the
           // reason only on the assembled message (or split across chunks that concat into it).
-          if (!refusalInfo && aggregatedChunk) {
-            refusalInfo = detectRefusal(aggregatedChunk);
+          if (!refusalInfo && turnMessage) {
+            refusalInfo = detectRefusal(turnMessage);
           }
           // EXT-37: surface a captured refusal as the terminal answer. Enqueue the clear message
           // (so the drained result is non-empty and bypasses the empty-response retry) and print it
           // once at WARNING level (surfaceRefusal). Any partial content already streamed is kept;
           // the refusal notice follows it, and its explanation carries any model-provided text.
-          // [[EXT-159]] — the provider's own word on why this message stopped, recorded before
-          // either branch decides what to make of it, so the raw fact is kept on the refusal path
-          // as well as the ordinary one.
-          noteFinishReason('stream', aggregatedChunk);
           if (refusalInfo) {
             // [[EXT-159]] — classified through `classifyRefusal` rather than mapped here, so this
             // site and the metadata feeder cannot come to disagree about what a refusal is.
@@ -1403,10 +1420,10 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
               )
             );
             controller.enqueue(surfaceRefusal(refusalInfo));
-          } else if (aggregatedChunk) {
+          } else if (turnMessage) {
             // No refusal: the same reader still has something to say about an answer that was cut
             // off against the output cap. Classification only — nothing is surfaced.
-            noteStopMetadata('agent.stream-stop-metadata', aggregatedChunk);
+            noteStopMetadata('agent.stream-stop-metadata', turnMessage);
           }
           debugLog(`Stream completed. Total chunks: ${totalChunks}`);
           controller.close();
@@ -1711,6 +1728,14 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
     // turn. Capture it (first per-chunk signal wins; aggregate fallback at stream end) and surface
     // it as a `text` event so every consumer (Ink TUI viewModel, AG-UI SSE) shows a clear notice.
     let refusalInfo: RefusalInfo | null = null;
+    // [[EXT-205]] — stop reasons are read per model message, by the same tracker as the string
+    // path (see the fold comment in `streamFromInput` and `modelMessageFold.ts`). It sits BESIDE
+    // `aggregatedAIChunk` rather than replacing it: that aggregate also carries the round's
+    // `tool_calls` for `flushAggregated`, and splitting it at a message boundary would drop the
+    // announcement of a call made by an earlier message in the round.
+    const messageReasons = new TurnMessageReasons((message) =>
+      this.noteFinishReason('events', message)
+    );
     const seenBinaryKeys = new Set<string>();
     const binaryBlocks: Array<{ mimeType: string; data: string }> = [];
     // TUI-C22 — one splitter for the whole stream so a <think> opened in one chunk and closed
@@ -1822,9 +1847,11 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
 
       // EXT-41: reuse EXT-37's detector (do NOT fork a second one). First per-chunk signal wins;
       // a ToolMessage / normal chunk yields null, so a normal turn never surfaces a false refusal.
-      if (!refusalInfo) {
+      // [[EXT-205]] — a middleware hook's own model call is not the answer; see the string path.
+      if (!refusalInfo && !isMiddlewareHookNode(streamNodeOf(_metadata))) {
         refusalInfo = detectRefusal(chunk);
       }
+      messageReasons.observe(chunk, _metadata);
 
       if (
         this.config?.writeBinaryOutputsToFile &&
@@ -1979,16 +2006,19 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
     }
 
     // EXT-41: aggregate-level fallback (I-1's robustness on this path too) — if no per-chunk
-    // metadata flagged a refusal, inspect the final aggregated message's stop/finish reason. Then
+    // metadata flagged a refusal, inspect the answer message's assembled stop/finish reason. Then
     // surface any refusal as a `text` event so the user sees a clear notice instead of a silent
     // empty turn. No statusUpdate here: consumers render the typed events, and a WARNING would
     // double-render in the TUI.
-    if (!refusalInfo && aggregatedAIChunk) {
-      refusalInfo = detectRefusal(aggregatedAIChunk);
-    }
+    //
     // [[EXT-159]] — the typed-event path's raw provider statement, on both branches. This is the
-    // surface most users watch, and it recorded no `finish_reason` anywhere at all.
-    this.noteFinishReason('events', aggregatedAIChunk);
+    // surface most users watch, and it recorded no `finish_reason` anywhere at all. [[EXT-205]] —
+    // recorded per message by the tracker; `end()` records the last one and returns the message
+    // that classifies the turn.
+    const turnMessage = messageReasons.end();
+    if (!refusalInfo && turnMessage) {
+      refusalInfo = detectRefusal(turnMessage);
+    }
     if (refusalInfo) {
       // [[EXT-159]] — the typed-event path's metadata site; classified through the same
       // `classifyRefusal` the other two use.
@@ -1999,9 +2029,9 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
         `Content-policy refusal detected on typed-event path (provider=${refusalInfo.provider} reason=${refusalInfo.reason})`
       );
       yield { type: 'text', delta: buildRefusalMessage(refusalInfo) };
-    } else if (aggregatedAIChunk) {
+    } else if (turnMessage) {
       // No refusal, but the same reader still sees an answer cut off against the output cap.
-      this.noteStopMetadata('agent.events-stop-metadata', aggregatedAIChunk);
+      this.noteStopMetadata('agent.events-stop-metadata', turnMessage);
     }
   }
 
