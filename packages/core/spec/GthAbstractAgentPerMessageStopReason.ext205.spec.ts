@@ -233,6 +233,23 @@ describe('[[EXT-205]] a stop reason per streamed model message', () => {
       expect(agent.getTerminationReason()).toBeNull();
     });
 
+    it('classifies from the LAST of two answer-side messages in one round', async () => {
+      // A retried model call inside `model_request`: two ids, same node, no ToolMessage between.
+      const retriedId = 'run-019a0ec6-4a99-7000-8000-0000000000bb';
+      const agent = agentStreaming([
+        [geminiChunk(ANSWER_ID, 'first attempt', 'STOP'), ANSWER_META],
+        [geminiChunk(retriedId, 'second attempt', 'MAX_TOKENS'), ANSWER_META],
+      ]);
+
+      await runStringPath(agent);
+
+      expect(tokens(agent)).toEqual(['stop', 'max_tokens']);
+      expect(agent.getTerminationReason()).toMatchObject({
+        site: 'agent.stream-stop-metadata',
+        category: 'output_truncated',
+      });
+    });
+
     it('splits on a change of graph node when the chunks carry no id', async () => {
       const agent = agentStreaming([
         [geminiChunk(undefined, 'cut '), ANSWER_META],

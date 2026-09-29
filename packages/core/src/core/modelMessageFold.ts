@@ -18,7 +18,7 @@
  * than starting a new one: a missing id is an absence of information, not evidence of a boundary,
  * and splitting on it would cut one message into pieces that each carry no reason.
  *
- * The fold does not decide what a message means. {@link isMiddlewareHookMessage} says whether it
+ * The fold does not decide what a message means. {@link isMiddlewareHookNode} says whether it
  * came from a middleware hook rather than from the agent's own model call; the caller decides what
  * that is worth.
  */
@@ -123,8 +123,10 @@ export class ModelMessageFold {
  *   it is not how the turn ended. This is the rule the single aggregate already applied by
  *   resetting at a `ToolMessage`, and it is kept: a round's stop reason is recorded, and the turn is
  *   still classified only by the message the turn ended on.
- * - **Last, not first**, because a `before_model` hook may call the model ahead of the answer; with
- *   hooks excluded, the last remaining message is the answer.
+ * - **Last, not first**, because one round can hold two of the agent's own model messages with no
+ *   `ToolMessage` between them: a `wrapModelCall` retry or fallback calls the model again inside
+ *   `model_request` (EXT-204's empty-turn retry is one), and the turn ended on the later attempt,
+ *   not on the one that was replaced.
  *
  * A stream with no node metadata at all (synthetic streams) has no hooks to exclude, so the verdict
  * is the last message, which is what the single aggregate read before.
