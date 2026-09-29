@@ -29,6 +29,7 @@ import { isShellCommandFailedError } from '#src/core/shell/ShellCommandFailedErr
 import { extractDebugRequestExtras, type DebugRequestExtras } from '#src/core/debugCapture.js';
 import { promoteTextEmittedToolCallMessage } from '#src/core/toolCallRepair/index.js';
 import { terminationReason, type GthTerminationReason } from '#src/core/terminationReason.js';
+import { createCutStreamRetryMiddleware } from '#src/core/cutStreamRetry.js';
 import {
   compactMessages,
   conversationSize,
@@ -1438,6 +1439,9 @@ export class GthLangChainAgent extends GthAbstractAgent {
     // suffixed set.
     this.registerApprovalsAwareTools(tools, { rung, gatedTools });
 
+    // [[EXT-204]] — the second cut is recorded on the agent, which is where the runner reads it.
+    const cutStreamRetry = createCutStreamRetryMiddleware((reason) => this.noteTermination(reason));
+
     // EXT-52 placement note: the HITL gate sits EARLY in the array — before user-configured
     // middleware and, crucially, before toolCallRepairMiddleware — because afterModel hooks run in
     // REVERSE array order (the EXT-35 rule above). The gate's afterModel therefore executes LAST,
@@ -1455,6 +1459,13 @@ export class GthLangChainAgent extends GthAbstractAgent {
       // never first pays for a summary call; and outboard of user middleware means it cannot be
       // bypassed, like its two siblings.
       contextGuard,
+      // [[EXT-204]] — a model reply cut off before it finished is retried once, inside the model
+      // call; the argument for placing the retry here rather than at the runner is in
+      // `cutStreamRetry.ts`. It must be the OUTERMOST `wrapModelCall` (the first in this array to
+      // have one, and none of the entries above does): each attempt then passes through user
+      // middleware and the debug capture on its own, and a second cut's error is wrapped exactly
+      // once, so the reason it carries is still one `cause` away where the runner looks for it.
+      cutStreamRetry,
       ...approvalMiddleware,
       ...configuredMiddleware,
       toolCallStatusMiddleware,

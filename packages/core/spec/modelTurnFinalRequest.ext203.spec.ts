@@ -139,9 +139,19 @@ const shellTool = () =>
     }
   );
 
-/** The run-2 shape: a failing tool call, then a reply with no answer text. */
+/**
+ * The run-2 shape: a failing tool call, then a reply with no answer text.
+ *
+ * [[EXT-204]] — the empty reply is a COMPLETE one: it carries Gemini's finish reason, in the key
+ * Vertex sends it under. A reply with no finish reason is a stream cut off before it finished, and
+ * that one is now retried inside the model call and never reaches the runner's empty-stream site
+ * (`cutStreamRetry.ext204.spec.ts` covers it). A complete empty reply is the model's own decision,
+ * is not retried, and still ends here, which is what these cells pin.
+ */
 const run2Shape: Script = (call) =>
-  call === 1 ? shellCall(call, 'fail pnpm exec vitest run quotaCooldown.spec.ts') : thoughtOnly();
+  call === 1
+    ? shellCall(call, 'fail pnpm exec vitest run quotaCooldown.spec.ts')
+    : thoughtOnly({ additional_kwargs: { finishReason: 'STOP' } });
 
 /** Tool call after tool call, never an answer: the drain loop's bound is what ends the turn. */
 const endlessTools: Script = (call) => shellCall(call, `echo round ${call}`);

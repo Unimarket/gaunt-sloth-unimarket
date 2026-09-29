@@ -62,6 +62,9 @@ const ACP_STOP_REASON: Readonly<Record<GthTerminationCategory, AcpClosedStopReas
   // The model handed back having said nothing. Nothing failed and nobody refused, so this is an
   // ordinary end of turn — the emptiness is the part the classification beside it carries.
   empty_response: 'end_turn',
+  // [[EXT-204]] — NOT `end_turn`: the model did not hand back, its reply was cut off in transit.
+  // Nothing in the closed vocabulary says that, so it is the provider-fault error it is.
+  stream_cut: null,
   content_refusal: 'refusal',
   output_truncated: 'max_tokens',
   // NOT `max_tokens`, which states the OUTPUT cap: this is the input window, a different bound with

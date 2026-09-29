@@ -47,6 +47,11 @@ export type GthTerminationCategory =
   | 'completed'
   /** The turn produced no content at all (no refusal, no error, nothing). */
   | 'empty_response'
+  /**
+   * [[EXT-204]] — the model's reply was cut off before it finished (no answer text, no tool call and
+   * no finish reason), and the one retry was cut off too.
+   */
+  | 'stream_cut'
   /** The model or the provider's safety system declined to answer. */
   | 'content_refusal'
   /** The answer was cut off against the output cap rather than finished. */
@@ -193,7 +198,12 @@ export type GthTerminationSite =
    * anyone downstream. `attachTerminationReason` is first-write-wins, so an inner site that
    * already classified the same failure still keeps it.
    */
-  | 'middleware.binary-attachment-rejected';
+  | 'middleware.binary-attachment-rejected'
+  /**
+   * [[EXT-204]] — the cut-stream retry middleware: the model's reply was cut off before it finished,
+   * it was retried once inside the same model call, and the retry was cut off as well.
+   */
+  | 'middleware.stream-cut-retry';
 
 /**
  * Which feeder produced the classification.
@@ -295,6 +305,10 @@ const POSTURE: Readonly<Record<GthTerminationCategory, GthTerminationPosture>> =
   // The one cause the runtime already retries as-is, and it is right to: an empty turn is usually
   // transient. A model that keeps returning nothing needs a different model, not another attempt.
   empty_response: { retryableAsIs: true, retryableAfterRemedy: true, remedy: 'change-model' },
+  // A stream cut off before its final chunk is the provider's transient fault, not the model's
+  // answer. The one as-is retry was already spent inside the model call, so the advice is to wait
+  // and send it again, as for a provider error.
+  stream_cut: { retryableAsIs: true, retryableAfterRemedy: true, remedy: 'back-off' },
   // A refusal is deterministic for the same input, so the same prompt refuses again.
   content_refusal: { retryableAsIs: false, retryableAfterRemedy: true, remedy: 'change-request' },
   // The answer was cut off, not refused: asking for less, or for a continuation, gets the rest.

@@ -1429,8 +1429,12 @@ export class GthAgentRunner {
           //   ends with the tool-calling AI message it is suspended on. Both of the CFG-84 lane's
           //   live `gth exec` runs on Gemini ended this way: the turn had ended on the bound, and
           //   re-invoking only added a provider 400 on top of it;
-          // - the model answered a tool result with no answer text (a thought-only reply, for
-          //   one), so the thread ends with that empty AI message.
+          // - the model answered a tool result with a COMPLETE reply carrying no answer text (a
+          //   finish reason such as `STOP` and nothing else), so the thread ends with that empty
+          //   AI message. That is the model's own decision, so it is not retried. A reply that
+          //   arrives with no finish reason as well, cut off before it finished, never gets here:
+          //   [[EXT-204]]'s middleware (`cutStreamRetry.ts`) retries it once inside the model
+          //   call, and a second cut ends the turn as a thrown `stream_cut` instead.
           //
           // The fallback is kept for what it can still do: an agent that exposes no thread state,
           // or a thread whose last message is not the model's. It is not replaced by a nudge such

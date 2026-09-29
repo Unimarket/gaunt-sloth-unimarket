@@ -42,6 +42,7 @@ import { debugLog } from '#src/utils/debugUtils.js';
 const CATEGORY_LABEL: Readonly<Record<GthTerminationCategory, string>> = {
   completed: 'the model finished',
   empty_response: 'the model returned nothing',
+  stream_cut: "the model's reply was cut off before it finished",
   content_refusal: 'the model declined to answer',
   output_truncated: 'the answer hit the output limit',
   context_overflow: 'the conversation outgrew the model input window',

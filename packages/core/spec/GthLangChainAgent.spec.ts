@@ -323,7 +323,8 @@ describe('GthLangChainAgent', () => {
         'Model: test-model (google-genai)',
         'Loaded tools: custom_tool_1, custom_tool_2',
         'Loaded middleware: GthLeanShellExitSoftening, GthMcpToolErrorSoftening, ' +
-          'GthLeanToolErrorBudget, GthLeanToolLoopGuard, GthContextGuard, HumanInTheLoopMiddleware, ' +
+          'GthLeanToolErrorBudget, GthLeanToolLoopGuard, GthContextGuard, GthCutStreamRetry, ' +
+          'HumanInTheLoopMiddleware, ' +
           'GthMiddlewareToolCallStatusUpdate, GthMiddlewareToolCallRepair, ' +
           'GthMiddlewareDebugCapture',
       ];
@@ -598,7 +599,8 @@ describe('GthLangChainAgent', () => {
         'Tool loading disabled by allowedTools: []; MCP/A2A servers will not be contacted. ' +
           'Omit allowedTools for no filtering.',
         'Loaded middleware: GthLeanShellExitSoftening, GthMcpToolErrorSoftening, ' +
-          'GthLeanToolErrorBudget, GthLeanToolLoopGuard, GthContextGuard, GthMiddlewareToolCallStatusUpdate, ' +
+          'GthLeanToolErrorBudget, GthLeanToolLoopGuard, GthContextGuard, GthCutStreamRetry, ' +
+          'GthMiddlewareToolCallStatusUpdate, ' +
           'GthMiddlewareToolCallRepair, GthMiddlewareDebugCapture',
       ];
 
