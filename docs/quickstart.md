@@ -2,9 +2,9 @@
 
 Get from nothing to a real answer and a real code review in about five minutes.
 
-You need [Node.js](https://nodejs.org) 24+ and an API key from one AI provider (or a local
-[Ollama](https://ollama.com) — see [Local & free models](guides/local-and-free-models.md) if you
-don't want to pay for one).
+You need [Node.js](https://nodejs.org) 24+ (or [Homebrew](https://brew.sh), which installs it for
+you) and an API key from one AI provider (or a local [Ollama](https://ollama.com) — see
+[Local & free models](guides/local-and-free-models.md) if you don't want to pay for one).
 
 ## 1. Install
 
@@ -12,8 +12,14 @@ don't want to pay for one).
 npm install -g gaunt-sloth
 ```
 
-This gives you the `gth` command (with `gsloth` and `gaunt-sloth` as aliases — use whichever you
-like; this guide uses `gth`).
+Or, on macOS or Linux, with Homebrew:
+
+```bash
+brew install pukeko-robotics/tap/gaunt-sloth
+```
+
+Either way, this gives you the `gth` command (with `gsloth` and `gaunt-sloth` as aliases — use
+whichever you like; this guide uses `gth`).
 
 ## 2. Set your provider key
 

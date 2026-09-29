@@ -34,6 +34,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 gth ask "what does this project do?" -f README.md
 ```
 
+On macOS or Linux you can install with Homebrew instead — see [Installation](#installation).
 The [Quickstart](docs/quickstart.md) walks through this end to end, and
 [Guides & Recipes](docs/guides/review-code-and-prs.md) covers real jobs — reviewing PRs in CI,
 coding against your own project rules, running a free local model, scripting it non-interactively.
@@ -112,7 +113,7 @@ What each package declares as its in-workspace dependencies:
 
 ## Installation
 
-Requires Node.js 24+ (see the `engines` field in `package.json`).
+With npm, which requires Node.js 24+ (see the `engines` field in `package.json`):
 
 ```bash
 npm install -g gaunt-sloth
@@ -122,6 +123,15 @@ Every release is published to `latest`, so the bare name gives you the newest on
 the old `gaunt-sloth-assistant` package? See
 [Upgrading from `gaunt-sloth-assistant` (1.x)?](docs/MIGRATION.md#upgrading-from-gaunt-sloth-assistant-1x)
 first.
+
+With [Homebrew](https://brew.sh) on macOS or Linux, which installs Node.js for you:
+
+```bash
+brew install pukeko-robotics/tap/gaunt-sloth
+```
+
+Upgrade it with `brew upgrade gaunt-sloth`. A release reaches Homebrew at least a day after npm,
+because Homebrew only installs npm packages that have been published for a day.
 
 ## Configuration
 

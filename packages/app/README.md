@@ -54,6 +54,12 @@ are gone and the wildcard with them.)
 npm install -g gaunt-sloth
 ```
 
+Or, on macOS or Linux, with [Homebrew](https://brew.sh):
+
+```bash
+brew install pukeko-robotics/tap/gaunt-sloth
+```
+
 For full usage documentation see the [root README](https://github.com/pukeko-robotics/gaunt-sloth/blob/main/README.md) and [docs/COMMANDS.md](https://github.com/pukeko-robotics/gaunt-sloth/blob/main/docs/COMMANDS.md).
 
 ## ACP server (editor integration)
