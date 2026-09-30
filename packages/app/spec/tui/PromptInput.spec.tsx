@@ -517,24 +517,84 @@ describe('tui <PromptInput> the slash menu over an unfinished message (TUI-C51)'
     expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('zzz');
   });
 
-  it('Backspace on an empty query leaves the highlight where the user put it', async () => {
-    // Backspace trims the query, and with nothing to trim it must do NOTHING: resetting the
-    // highlight here moves the selection with nothing on screen having changed to explain it, and
-    // the row the user arrowed down to is the row they are about to press Enter on.
-    const { stdin, lastFrame } = await withDraft();
+  it('Backspace on an empty query closes the menu, leaving the message as it was (REL-27)', async () => {
+    // Freshly opened, with the highlight moved: an arrow key puts no text in the query, so it is
+    // still empty and Backspace is the "never mind" exit rather than a no-op.
+    const { stdin, lastFrame, onSubmit } = await withDraft();
     stdin.write(CTRL_G);
     await tick();
     stdin.write(DOWN);
     await tick();
-    const highlighted = highlightedIn(lastFrame() ?? '');
-    expect(highlighted).not.toBeNull();
+    expect(lastFrame() ?? '').toMatch(/❯/);
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('');
 
     stdin.write(BACKSPACE);
     await tick();
     const frame = lastFrame() ?? '';
-    expect(highlightedIn(frame)).toBe(highlighted);
-    // …and neither the query nor the message underneath it lost a character either.
-    expect(commandMenuQueryIn(frame)).toBe('');
+    expect(frame).not.toMatch(/❯/);
+    expect(commandMenuQueryIn(frame)).toBeNull();
+    // The message lost no character — the Backspace was the menu's, not the editor's.
+    expect(bufferIn(frame)).toBe(DRAFT);
+    expect(caretIn(frame)).toEqual({ row: 0, column: DRAFT.length });
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    // The editor has the keyboard back: the next Backspace is the message's.
+    stdin.write(BACKSPACE);
+    await tick();
+    expect(bufferIn(lastFrame() ?? '')).toBe(DRAFT.slice(0, -1));
+  });
+
+  it('wiping the query keeps the menu open, and one more Backspace closes it (REL-27)', async () => {
+    const { stdin, lastFrame } = await withDraft();
+    stdin.write(CTRL_G);
+    await tick();
+    await typeSlowly(stdin, 'st');
+
+    stdin.write(BACKSPACE);
+    await tick();
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('s');
+    stdin.write(BACKSPACE);
+    await tick();
+    // Empty, and still open — the keystroke that emptied it is not the one that closes it.
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('');
+    expect(lastFrame() ?? '').toMatch(/❯/);
+
+    stdin.write(BACKSPACE);
+    await tick();
+    const frame = lastFrame() ?? '';
+    expect(commandMenuQueryIn(frame)).toBeNull();
+    expect(frame).not.toMatch(/❯/);
+    expect(bufferIn(frame)).toBe(DRAFT);
+  });
+
+  it('Delete on an empty query closes the menu too (REL-27)', async () => {
+    const { stdin, lastFrame } = await withDraft();
+    stdin.write(CTRL_G);
+    await tick();
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('');
+
+    stdin.write(DELETE);
+    await tick();
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBeNull();
+    expect(bufferIn(lastFrame() ?? '')).toBe(DRAFT);
+  });
+
+  it('Enter sent as a linefeed dispatches the highlighted command too (REL-27)', async () => {
+    // Some terminals send Enter as `\n`, which Ink names `'enter'` with `key.return` unset — and a
+    // `\n` is not typed text either, so a handler that asked only `key.return` dropped it silently.
+    const onSubmit = vi.fn();
+    const { stdin, lastFrame } = await withDraft(onSubmit);
+    stdin.write(CTRL_G);
+    await tick();
+    await typeSlowly(stdin, 'stat');
+
+    stdin.write('\n');
+    await tick();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith('/status');
+    const frame = lastFrame() ?? '';
+    expect(commandMenuQueryIn(frame)).toBeNull();
+    // The linefeed reached neither buffer: the message is back exactly as it was.
     expect(bufferIn(frame)).toBe(DRAFT);
   });
 
@@ -602,24 +662,37 @@ describe('tui <PromptInput> the slash menu over an unfinished message (TUI-C51)'
     expect(onSubmit).toHaveBeenCalledWith('/debug-dump');
   });
 
-  it('OPENS on the chord rather than toggling, so an odd or even count is the same state', async () => {
-    // TUI-C58's discipline, applied to the binding itself: a toggle would let a test that pressed
-    // the chord twice pass on a tree where it did nothing at all. Three presses, one at a time.
-    const { stdin, lastFrame } = await withDraft();
-    for (let i = 0; i < 3; i += 1) {
+  it('toggles on the chord: a second press closes the menu and leaves the message (REL-27)', async () => {
+    // TUI-C58's discipline: an even number of presses looks like none, so the open state is
+    // asserted BETWEEN presses — a tree where the chord did nothing fails the first expectation.
+    const { stdin, lastFrame, onSubmit } = await withDraft();
+    for (let i = 0; i < 2; i += 1) {
       stdin.write(CTRL_G);
       await tick();
       expect(lastFrame() ?? '').toMatch(/❯/);
-    }
-    expect(bufferIn(lastFrame() ?? '')).toBe(DRAFT);
+      expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('');
 
-    // …and pressing it again with a query typed restarts that query rather than closing anything.
+      stdin.write(CTRL_G);
+      await tick();
+      expect(lastFrame() ?? '').not.toMatch(/❯/);
+      expect(commandMenuQueryIn(lastFrame() ?? '')).toBeNull();
+      expect(bufferIn(lastFrame() ?? '')).toBe(DRAFT);
+    }
+
+    // With a query typed, the chord still closes rather than restarting it — and reopening starts
+    // from an empty query, not the abandoned one.
+    stdin.write(CTRL_G);
+    await tick();
     await typeSlowly(stdin, 'stat');
     expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('stat');
     stdin.write(CTRL_G);
     await tick();
+    expect(commandMenuQueryIn(lastFrame() ?? '')).toBeNull();
+    expect(bufferIn(lastFrame() ?? '')).toBe(DRAFT);
+    stdin.write(CTRL_G);
+    await tick();
     expect(commandMenuQueryIn(lastFrame() ?? '')).toBe('');
-    expect(lastFrame() ?? '').toMatch(/❯/);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('drops a control byte out of the MENU’s query as well as out of the message', async () => {

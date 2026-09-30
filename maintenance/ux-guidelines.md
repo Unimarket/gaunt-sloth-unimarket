@@ -864,10 +864,10 @@ their config has a problem.
   a pending shell approval answers it (rejecting, fail-closed); a turn in flight is aborted; the
   focused debug pane clears its search or unfocuses; otherwise the conversation returns to the
   newest output. The order is the specification, not an artefact of where the branches sit.
-  - **The slash menu is a known exception, in both of its modes.** The prompt closes the menu on
-    `Esc`, but the abort above does not consult the menu the way the `Tab` handler consults it — so
-    `Esc` pressed to dismiss the menu while a turn is streaming closes the menu **and** stops the
-    turn. Anything that advertises `Esc` as the way out of that menu has to say so.
+  - **An open slash menu, in either of its modes, comes before the abort (TUI-C94, REL-27).** With
+    a menu owning the keyboard, `Esc` closes the menu and the turn keeps running; the next `Esc`,
+    with the menu gone, stops the turn. `Esc` is the advertised way out of the menu, and a way out
+    of a menu that also discards the work in flight is not one a user can press safely.
 - **`Ctrl+C`** — on the TUI, one key with three meanings, resolved most-local-first: a **modal state**
   (attack banner, pending approval, either picker — `/approvals` and bare `/resume`) leaves, because
   that is what those screens promise, the prompt is unmounted under them so there is no typed
@@ -934,8 +934,9 @@ their config has a problem.
   space. **`Ctrl+G` — or `Ctrl+/` — opens the same menu with a query of its own**, so it is reachable
   with a half-written message in the prompt, where the first door cannot open at all and clearing the
   buffer to reach it would destroy what the user wrote. In that mode the editor stands down
-  completely, the message is captured and put back around the dispatch (caret included), and `Esc`
-  closes leaving it as it was — mid-turn, `Esc` also stops the turn (see the `Esc` entry above).
+  completely, the message is captured and put back around the dispatch (caret included), and every
+  way out — `Esc`, the chord again, Backspace on an empty query — leaves it as it was and leaves a
+  running turn running (see the `Esc` entry above).
   **Only one of the two is ever on screen.**
   - **The menu is a bounded, scrolling viewport, one row per entry (DL-7 legibility, DL-3 preserve
     the user's content, TUI-C92).** The dock is pinned to the terminal floor and never gives up
@@ -985,8 +986,13 @@ their config has a problem.
     rather than on how the chord reads: `Ctrl+/` sends nothing at all on macOS, in Terminal.app and
     in Zed, while Konsole sends `0x1f`. `Alt+/` is not bound because on macOS it is the printable
     `÷`, and `Ctrl+\` is not because it shares `Ctrl+/`'s defect and is conventionally `SIGQUIT`.
-  - **The chord OPENS; it never toggles.** An even number of presses would then be indistinguishable
-    from none, which is how a test passes on a tree where the binding does nothing.
+  - **The chord toggles, and Backspace on an empty query closes (REL-27).** A user who opened the
+    menu by accident reaches for the key that opened it, or wipes the query and keeps going; both
+    must close it without reaching the turn. Because an even number of presses looks like none, a
+    test of the chord asserts the open state between presses — otherwise it passes on a tree where
+    the binding does nothing (TUI-C58).
+  - **Enter is `\r` or `\n`.** Some terminals send Enter as a linefeed, which Ink reports without
+    `key.return`; the menu binds both, as the editor does.
   - **It is not gated on a turn running.** `Ctrl+T` is, because Ink broadcasts every keypress
     everywhere; here filtering IS the mechanism and there is nothing to swallow — and composing a
     message while idle is precisely the case the door exists for.

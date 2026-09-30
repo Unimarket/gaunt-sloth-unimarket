@@ -1713,7 +1713,9 @@ export function App(props: TuiAppProps): React.ReactElement {
     // jump to the newest output. Returning here leaves the picker the only claimant.
     if (approvalsPicker || resumePicker) return;
 
-    if (key.escape && runningRef.current) {
+    // TUI-C94, REL-27 — while either slash menu owns the keyboard, `Esc` is the prompt's: it closes
+    // the menu and leaves the turn running. A second `Esc`, with the menu gone, stops the turn.
+    if (key.escape && runningRef.current && !slashMenuActiveRef.current) {
       abortRef.current?.abort();
       return;
     }

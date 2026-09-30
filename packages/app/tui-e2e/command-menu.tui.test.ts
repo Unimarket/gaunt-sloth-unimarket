@@ -47,8 +47,9 @@ const envFor = (fixtureName: string): Record<string, string | undefined> => {
  * The message is carried on ACROSS the chord one character at a time, waiting for each to be drawn
  * before writing the next, for the reason the Ctrl+T cell states: a burst written as one event
  * arrives as a single input event and lands in one step, testing neither the chord's letter nor the
- * caret. The chord itself is pressed an ODD number of times, because it OPENS rather than toggles
- * and an even count would let a binding that does nothing at all pass (TUI-C58).
+ * caret. The chord toggles (REL-27), so an even number of presses looks like none: every cell that
+ * presses it twice asserts the open state between the presses, or a binding that does nothing at
+ * all would pass (TUI-C58).
  */
 test.describe('gth chat TUI — the slash menu over an unfinished message (greeting fixture)', () => {
   test.use({
@@ -172,5 +173,73 @@ test.describe('gth chat TUI — the slash menu over an unfinished message (greet
     terminal.submit();
     await expect(terminal.getByText(`You › ${DRAFT}o`)).toBeVisible();
     await expect(terminal.getByText('chat  ·  turns: 1  ·  ready')).toBeVisible();
+  });
+
+  test('Ctrl+G again closes the menu, and so does Backspace on an empty query (REL-27)', async ({
+    terminal,
+  }) => {
+    await expect(terminal.getByText('ready to chat')).toBeVisible();
+
+    terminal.write(DRAFT);
+    await expect(terminal.getByText(`> ${DRAFT}`)).toBeVisible();
+
+    // The chord toggles. Open is asserted before the second press, so a dead binding fails here.
+    terminal.write('\x07'); // Ctrl+G
+    await expect(terminal.getByText('❯')).toBeVisible();
+    terminal.write('s');
+    await expect(terminal.getByText('/ s')).toBeVisible();
+    terminal.write('\x07'); // Ctrl+G
+    await expect(terminal.getByText('❯')).not.toBeVisible();
+    await expect(terminal.getByText('/ s')).not.toBeVisible();
+    await expect(terminal.getByText(`> ${DRAFT}`)).toBeVisible();
+
+    // Backspace trims the query, and on an empty one closes the menu — the message loses nothing.
+    terminal.write('\x07'); // Ctrl+G
+    await expect(terminal.getByText('❯')).toBeVisible();
+    terminal.write('s');
+    await expect(terminal.getByText('/ s')).toBeVisible();
+    terminal.keyBackspace();
+    await expect(terminal.getByText('/ s')).not.toBeVisible();
+    await expect(terminal.getByText('❯')).toBeVisible();
+    terminal.keyBackspace();
+    await expect(terminal.getByText('❯')).not.toBeVisible();
+    await expect(terminal.getByText(`> ${DRAFT}`)).toBeVisible();
+
+    // The editor has the keyboard back: the next character is the message's.
+    terminal.write('o');
+    await expect(terminal.getByText(`> ${DRAFT}o`)).toBeVisible();
+  });
+});
+
+/**
+ * TUI-C94, REL-27 — `Esc` with the menu open mid-turn closes the menu and leaves the turn running.
+ *
+ * The turn is let run to completion and then read: every delta arrived and no interrupt notice was
+ * written. "Interrupted is not on screen" alone, checked while streaming, would pass on a screen
+ * that had not caught up with an abort yet — the same reasoning the split-meta-key cell uses.
+ */
+test.describe('gth chat TUI — the slash menu mid-turn (slow fixture)', () => {
+  test.use({
+    program: { file: 'node', args: [cli, 'chat', '--tui'] },
+    env: envFor('slow.json'),
+    columns: 100,
+    rows: 30,
+  });
+
+  test('Esc closes the chord menu mid-turn without aborting the turn', async ({ terminal }) => {
+    await expect(terminal.getByText('ready to chat')).toBeVisible();
+    terminal.write('go');
+    await expect(terminal.getByText('> go')).toBeVisible();
+    terminal.submit();
+    await expect(terminal.getByText('streaming')).toBeVisible();
+
+    terminal.write('\x07'); // Ctrl+G
+    await expect(terminal.getByText('❯')).toBeVisible();
+    terminal.keyEscape();
+    await expect(terminal.getByText('❯')).not.toBeVisible();
+
+    await expect(terminal.getByText('chat  ·  turns: 1  ·  ready')).toBeVisible();
+    await expect(terminal.getByText('nine ten')).toBeVisible();
+    await expect(terminal.getByText('Interrupted')).not.toBeVisible();
   });
 });
