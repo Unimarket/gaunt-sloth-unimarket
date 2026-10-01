@@ -6,6 +6,10 @@
 // `npm run release:bump -- prerelease alpha`  — semver.inc with a preid, then sync
 // `npm run release:bump -- 2.0.0-alpha.0`     — set an explicit version, then sync
 // `npm run release:bump-and-commit -- ...`    — same, then refresh pnpm-lock.yaml and git-commit
+// `... --archive-notes <shipped version>`      — also archive release-notes/next.md as that
+//                                                version's notes and open a fresh next.md for the
+//                                                new version (OPS-59). Only the release workflow's
+//                                                post-bump passes it: it means "this just shipped".
 //
 // LOCKED packages — all five carry the SAME version and pin each other exactly:
 //   @gaunt-sloth/core, @gaunt-sloth/agent, @gaunt-sloth/review, @gaunt-sloth/batch
@@ -37,6 +41,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import semver from 'semver';
+import { archiveReleaseNotes } from './scripts/release-notes-archive.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SCOPE = '@gaunt-sloth';
@@ -50,11 +55,22 @@ const ALL_DIRS = [...SYNCED, APP_DIR];
 const RELEASE_TYPES = ['patch', 'minor', 'major', 'prepatch', 'preminor', 'premajor', 'prerelease'];
 const PREIDS = ['alpha', 'beta', 'rc'];
 
-// Drop our own `--commit` flag and any bare `--` arg-separator. pnpm forwards
-// the `--` from `pnpm run <script> -- <args>` literally into argv (npm strips
-// it), so without this a `--` would be parsed as the version spec.
-const args = process.argv.slice(2).filter((a) => a !== '--commit' && a !== '--');
-const commit = process.argv.slice(2).includes('--commit');
+// Drop our own `--commit` and `--archive-notes <version>` flags and any bare `--`
+// arg-separator. pnpm forwards the `--` from `pnpm run <script> -- <args>`
+// literally into argv (npm strips it), so without this a `--` would be parsed as
+// the version spec.
+const rawArgs = process.argv.slice(2);
+const archiveAt = rawArgs.indexOf('--archive-notes');
+const archiveNotesFor = archiveAt === -1 ? undefined : rawArgs[archiveAt + 1];
+if (archiveAt !== -1 && (!archiveNotesFor || semver.valid(archiveNotesFor) === null)) {
+  console.error(`--archive-notes needs the version that shipped, got: ${archiveNotesFor}`);
+  process.exit(1);
+}
+const args = rawArgs.filter(
+  (a, i) =>
+    a !== '--commit' && a !== '--' && (archiveAt === -1 || (i !== archiveAt && i !== archiveAt + 1))
+);
+const commit = rawArgs.includes('--commit');
 
 // Arg shapes:
 //   (nothing)                  -> patch
@@ -161,6 +177,29 @@ setPublishTag(app);
 writePkg(appPath, app);
 console.log(`  ${'gaunt-sloth'.padEnd(9)} ${appBefore} → ${target}  (tag ${distTag})`);
 
+// OPS-59 — archive the notes the release just published and open the next file. This runs after
+// the publish, so it must never be the reason main is left un-bumped: a failure is reported and the
+// bump carries on without the notes files.
+const notesFiles = [];
+if (archiveNotesFor) {
+  try {
+    const { changed, archived } = archiveReleaseNotes({
+      shippedVersion: archiveNotesFor,
+      nextVersion: target,
+      notesDir: join(ROOT, 'release-notes'),
+    });
+    notesFiles.push(...changed.map((name) => `release-notes/${name}`));
+    console.log(
+      archived
+        ? `  release-notes/next.md archived as release-notes/${changed[0]}; fresh next.md for ${target}`
+        : `  release-notes/next.md had no notes to archive; fresh next.md for ${target}`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.log(`::warning title=Release notes not archived::${reason}`);
+  }
+}
+
 if (commit) {
   // pnpm-lock.yaml records the workspace importers, so refresh it or a later
   // `pnpm install --frozen-lockfile` sees the lock and the package.jsons out of
@@ -176,7 +215,11 @@ if (commit) {
     shell: process.platform === 'win32',
   });
 
-  const files = [...ALL_DIRS.map((name) => `packages/${name}/package.json`), 'pnpm-lock.yaml'];
+  const files = [
+    ...ALL_DIRS.map((name) => `packages/${name}/package.json`),
+    'pnpm-lock.yaml',
+    ...notesFiles,
+  ];
   const status = execFileSync('git', ['status', '--porcelain', '--', ...files], {
     cwd: ROOT,
     encoding: 'utf8',

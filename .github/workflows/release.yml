@@ -406,9 +406,9 @@ jobs:
         # same version is safe here.
         run: ./tag-packages.sh --push
       - name: Resolve the release notes for this version
-        # The hand-written release-notes/v<version>.md (dots -> underscores) is what the Release
-        # page should show; scripts/release-notes-for.mjs turns it into a title (its H1) and a body
-        # (the rest), and reports both as step outputs. The logic is a script, not inline bash,
+        # The hand-written release-notes/next.md is what the Release page should show;
+        # scripts/release-notes-for.mjs turns it into a title (its H1) and a body (the rest), and
+        # reports both as step outputs. The logic is a script, not inline bash,
         # because this step runs only on a real release dispatch — inline, it could be verified only
         # by shipping a broken release. Unit-tested in packages/core/spec/releaseNotesFor.spec.ts.
         id: notes
@@ -438,8 +438,8 @@ jobs:
           elif [ -n "$NOTES_BODY_FILE" ]; then
             gh release create "v${VERSION}" --title "$NOTES_TITLE" --notes-file "$NOTES_BODY_FILE" $PRE_FLAG
           else
-            # Nobody wrote release-notes/v<version>.md for this version, so the Release ships with an
-            # empty body. GitHub's synthesised list of merged pull requests is NOT used: branches
+            # There is no release-notes/next.md, so the Release ships with an empty body. GitHub's
+            # synthesised list of merged pull requests is NOT used: branches
             # here land by local merge and usually open no PR, so that list describes whatever
             # happened to arrive as one — a plausible-looking account of a release it does not
             # describe. Blank says nothing; the generated list says something untrue.
@@ -465,6 +465,10 @@ jobs:
           BUMP: ${{ inputs.bump }}
           PREID: ${{ inputs.preid }}
           EXPLICIT_VERSION: ${{ inputs.explicit_version }}
+          # OPS-59 — the version that just shipped. `--archive-notes` archives release-notes/next.md
+          # (the notes that version published) under its name and opens a fresh next.md, in the
+          # same commit as the bump.
+          SHIPPED_VERSION: ${{ steps.current.outputs.version }}
         run: |
           set -euo pipefail
           if [ "$BUMP" = "explicit" ]; then
@@ -472,7 +476,7 @@ jobs:
               echo "bump=explicit requires explicit_version" >&2
               exit 1
             fi
-            pnpm run release:bump-and-commit -- "$EXPLICIT_VERSION"
+            pnpm run release:bump-and-commit -- "$EXPLICIT_VERSION" --archive-notes "$SHIPPED_VERSION"
           else
             # bump.mjs takes the preid POSITIONALLY and validates it whenever it is present at all
             # — it does not care that patch/minor/major ignore one — so the "not a prerelease"
@@ -482,10 +486,10 @@ jobs:
             # publish.
             case "$PREID" in
               alpha|beta|rc)
-                pnpm run release:bump-and-commit -- "$BUMP" "$PREID"
+                pnpm run release:bump-and-commit -- "$BUMP" "$PREID" --archive-notes "$SHIPPED_VERSION"
                 ;;
               *)
-                pnpm run release:bump-and-commit -- "$BUMP"
+                pnpm run release:bump-and-commit -- "$BUMP" --archive-notes "$SHIPPED_VERSION"
                 ;;
             esac
           fi

@@ -130,12 +130,14 @@ Step order inside the `release` job:
 5. `./tag-packages.sh --push` — tags the current version (skips already-existing tags, so a
    re-dispatch of the same version is safe).
 6. `gh release create v<current>` (`--prerelease` when the current version has a prerelease suffix),
-   with the title and body taken from `release-notes/v<current>.md` — see
+   with the title and body taken from `release-notes/next.md` — see
    [GitHub Release](#github-release).
 7. **Publish every package** at the current version, each on the dist-tag derived from its own
    version — `publish-all.sh` does that per package, so the job passes no global `--tag`.
 8. **Only after publish succeeds:** post-bump — `pnpm run release:bump-and-commit` driven by the
-   dispatch inputs, then `git push origin HEAD:main`.
+   dispatch inputs, with `--archive-notes <current>`: the same commit archives
+   `release-notes/next.md` as `release-notes/v<current>.md` and opens a fresh `next.md` for the next
+   version. Then `git push origin HEAD:main`. Nothing should merge into `main` while this runs.
 
 #### The dispatch inputs describe the POST-bump, not the version shipped
 
@@ -287,21 +289,22 @@ The consolidated pipeline creates the GitHub Release automatically (`gh release 
 v<version>`, with `--prerelease` for prerelease versions). You normally don't create releases by
 hand.
 
-**Its title and body come from the release notes you wrote.** `scripts/release-notes-for.mjs`
-resolves `release-notes/v<version>.md` (the version with every dot replaced by an underscore),
-takes its `#` heading as the Release title, and passes the rest as the body — so write the notes
-before dispatching. See [release-notes/RELEASE-NOTES-HOWTO.md](../release-notes/RELEASE-NOTES-HOWTO.md).
+**Its title and body come from `release-notes/next.md`**, where each user-facing change added a
+bullet before it merged. `scripts/release-notes-for.mjs` takes its `#` heading as the Release title
+and passes the rest as the body — so read it through before dispatching. See
+[release-notes/RELEASE-NOTES-HOWTO.md](../release-notes/RELEASE-NOTES-HOWTO.md).
 
-A version with no notes file gets a Release with an **empty body**. Nothing is synthesised to fill
+With no `next.md`, or nothing under its heading, the Release gets an **empty body**. Nothing is synthesised to fill
 it: a body built from merged pull requests describes whatever happened to open one — branches here
 land by local merge and usually open none — so it reads as an account of the release while
 describing something else. Blank says nothing; that list says something untrue.
 
 **You find that out before it ships, not after.** The `validate-inputs` job runs
 `scripts/release-notes-preflight.mjs` at the start of every release run, before anything is tagged,
-built or published. With no notes file for the version on `main` it raises a warning annotation
-naming the exact path it looked for, and writes the same to the job summary; with one, it confirms
-which file will be used. The annotation stays on the run page, so it is still there at the deploy
+built or published. When `next.md` on `main` is missing or has nothing under its heading it raises a
+warning annotation naming the file, and writes the same to the job summary; otherwise it confirms
+which file will be used. It also warns when the heading names a version other than the one
+shipping, since the heading becomes the Release title. The annotation stays on the run page, so it is still there at the deploy
 approval. **It cannot fail the run** — the step is `continue-on-error`, the script exits 0 on every
 path including its own crash paths, and no `id:` on the step lets anything depend on its outcome.
 Blocking a release on a missing prose file would let a documentation omission stop a shipping fix,
@@ -313,7 +316,7 @@ If you ever need to create one by hand:
 (if you have multiple accounts in gh, you may need to do `gh auth switch`)
 
 ```bash
-gh release create v<version> --notes-file release-notes/v<version_with_underscores>.md
+gh release create v<version> --notes-file release-notes/next.md
 ```
 
 ## Viewing diff side by side

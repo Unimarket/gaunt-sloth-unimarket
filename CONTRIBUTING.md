@@ -123,7 +123,7 @@ routing those scopes to localhost:
 feature, a changed default, a removed or renamed export, a config change an existing file has to
 follow — is a minor, and that includes breaking changes. The major version is not used to signal
 compatibility; it is kept for marking a significant milestone. So every breaking change is called
-out as breaking in its `release-notes/` entry, because the version number will not say so.
+out as breaking in its `release-notes/next.md` bullet, because the version number will not say so.
 
 ```bash
 # Bump like `npm version` — patch | minor | major or an explicit version;
@@ -211,7 +211,8 @@ When working in `spec/`:
 - Import the file under test dynamically inside each test
 - Mock dependencies instead of importing mocked implementations directly into the tested module
 
-When adding release notes, follow the conventions in `release-notes/`.
+A change a user would notice adds a bullet to `release-notes/next.md` before it merges; the
+conventions are in `release-notes/RELEASE-NOTES-HOWTO.md`.
 
 ## Pull Request Guidelines
 

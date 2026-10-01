@@ -191,16 +191,36 @@ describe('scripts/release-notes-for.mjs', () => {
   });
 
   describe('releaseNotesFor', () => {
-    it('uses the notes file for a version that has one', async () => {
+    it('uses release-notes/next.md, whatever the version', async () => {
       const { releaseNotesFor } = await import(HELPER);
       const dir = notesDir({
-        'v2_0_0-beta_3.md': '# v2.0.0-beta.3 The Considered Account\n\nWhat changed.\n',
+        'next.md': '# v2.0.0-beta.3 The Considered Account\n\nWhat changed.\n',
       });
       const result = releaseNotesFor('2.0.0-beta.3', dir);
       expect(result.notesMissing).toBe(false);
-      expect(result.notesPath).toBe(join(dir, 'v2_0_0-beta_3.md'));
+      expect(result.notesPath).toBe(join(dir, 'next.md'));
       expect(result.title).toBe('v2.0.0-beta.3 The Considered Account');
       expect(result.body).toBe('What changed.\n');
+      expect(result.bodyEmpty).toBe(false);
+    });
+
+    it('does not read an archived per-version file: next.md is the only source', async () => {
+      const { releaseNotesFor } = await import(HELPER);
+      // OPS-59 — one source. A stray v<version>.md beside a missing next.md must not be picked up,
+      // or two files could each claim to be the notes for the release.
+      const dir = notesDir({ 'v2_0_0-beta_3.md': '# v2.0.0-beta.3\n\n- Archived.\n' });
+      const result = releaseNotesFor('2.0.0-beta.3', dir);
+      expect(result.notesMissing).toBe(true);
+      expect(result.body).toBeUndefined();
+    });
+
+    it('flags a next.md with nothing under its heading as an empty body', async () => {
+      const { releaseNotesFor } = await import(HELPER);
+      // What the post-bump leaves behind before any change has added a bullet.
+      const result = releaseNotesFor('2.1.5', notesDir({ 'next.md': '# v2.1.5\n\n  \n' }));
+      expect(result.notesMissing).toBe(false);
+      expect(result.title).toBe('v2.1.5');
+      expect(result.bodyEmpty).toBe(true);
     });
 
     it('takes the title from a file that is nothing but its H1, with an empty body', async () => {
@@ -209,12 +229,13 @@ describe('scripts/release-notes-for.mjs', () => {
       // paragraph under it. The title carries a suffix on purpose — a heading of the bare version
       // is also what the no-file case produces, so a fixture without one could not tell the two
       // apart, and both end with an empty body.
-      const dir = notesDir({ 'v2_0_0-beta_3.md': '# v2.0.0-beta.3 Title Only\n' });
+      const dir = notesDir({ 'next.md': '# v2.0.0-beta.3 Title Only\n' });
       const result = releaseNotesFor('2.0.0-beta.3', dir);
       expect(result.notesMissing).toBe(false);
-      expect(result.notesPath).toBe(join(dir, 'v2_0_0-beta_3.md'));
+      expect(result.notesPath).toBe(join(dir, 'next.md'));
       expect(result.title).toBe('v2.0.0-beta.3 Title Only');
       expect(result.body).toBe('');
+      expect(result.bodyEmpty).toBe(true);
     });
 
     it('reports no notes and no body when the version has no file', async () => {
@@ -229,18 +250,17 @@ describe('scripts/release-notes-for.mjs', () => {
       expect(result.title).toBe('v9.9.9');
     });
 
-    it('reads the real release-notes directory in this repository', async () => {
+    it('reads the real release-notes/next.md in this repository', async () => {
       const { releaseNotesFor } = await import(HELPER);
       // No notesDir argument: this is the resolution the workflow actually performs, against the
-      // files in the repo. A fixture cannot prove the helper meets them.
-      const result = releaseNotesFor('2.0.0-beta.2');
-      expect(result.notesMissing).toBe(false);
-      expect(result.title).toBe('v2.0.0-beta.2 The Alignment Check');
-      expect(result.body).not.toContain('# v2.0.0-beta.2 The Alignment Check');
-      // The real file separates its H1 from the body with a blank line; the body must start at the
-      // first real line, not at that separator.
-      expect(result.body?.startsWith('## New Features')).toBe(true);
-      expect(result.body?.length).toBeGreaterThan(100);
+      // files in the repo. A fixture cannot prove the helper meets them. The content changes every
+      // release, so only its shape is asserted: the file is there and opens with an H1, which is
+      // removed from the body.
+      const result = releaseNotesFor('0.0.0');
+      expect(result.notesMissing, 'release-notes/next.md must exist on main').toBe(false);
+      expect(result.notesPath).toBe(join(REAL_NOTES_DIR, 'next.md'));
+      expect(result.title).not.toBe('v0.0.0');
+      expect(result.body).not.toContain(`# ${result.title}`);
     });
   });
 
@@ -280,7 +300,7 @@ describe('scripts/release-notes-for.mjs', () => {
 
     it('writes the body file and points the step outputs at it', () => {
       const dir = notesDir({
-        'v2_0_0-beta_3.md': '# v2.0.0-beta.3 The Considered Account\n\nWhat changed.\n',
+        'next.md': '# v2.0.0-beta.3 The Considered Account\n\nWhat changed.\n',
       });
       const bodyOut = join(dir, 'out', 'release-body.md');
       const outputFile = join(dir, 'github-output.txt');
@@ -297,7 +317,7 @@ describe('scripts/release-notes-for.mjs', () => {
       // with an empty body, and only the title and the body_file output tell the workflow which
       // branch it is in. Here body_file must point at a real (empty) file, so the step takes the
       // --notes-file branch, and the title must come from the H1 rather than from the version.
-      const dir = notesDir({ 'v2_0_0-beta_3.md': '# v2.0.0-beta.3 Title Only\n' });
+      const dir = notesDir({ 'next.md': '# v2.0.0-beta.3 Title Only\n' });
       const bodyOut = join(dir, 'out', 'release-body.md');
       const outputFile = join(dir, 'github-output.txt');
       const result = run('2.0.0-beta.3', dir, bodyOut, outputFile);

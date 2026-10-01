@@ -323,3 +323,41 @@ describe('OPS-123 the release notes preflight is wired into validate-inputs', ()
     ).toBe(true);
   });
 });
+
+/**
+ * OPS-59 — the post-bump archives release-notes/next.md as the version that just shipped and opens a
+ * fresh one, in the same commit as the version bump. What the archive does is proven by running it,
+ * in releaseNotesArchive.spec.ts; what can only be asserted here is that every bump the post-bump
+ * can make passes the flag, and that the flag carries the SHIPPED version — the one the release
+ * read its notes for — rather than one of the dispatch inputs, which describe the next version.
+ */
+describe('OPS-59 the post-bump archives the release notes', () => {
+  const POSTBUMP_STEP = 'Post-bump main to the next version (drives bump.mjs from dispatch inputs)';
+
+  function postBump(): string {
+    return stepText(releaseJob(), POSTBUMP_STEP);
+  }
+
+  it('passes --archive-notes on every bump-and-commit the step can run', () => {
+    const block = runBlock(postBump());
+    // Control: an empty slice would satisfy the count below for the wrong reason.
+    expect(block, `the "${POSTBUMP_STEP}" step is missing`).toContain('release:bump-and-commit');
+    const bumps = block
+      .split('\n')
+      .filter((line) => /^[ \t]*pnpm run release:bump-and-commit/.test(line));
+    expect(bumps.length).toBeGreaterThan(0);
+    for (const line of bumps) {
+      expect(
+        line,
+        'a post-bump that skips the archive leaves the shipped notes in next.md, where the next ' +
+          'release would publish them again under its own version.'
+      ).toContain('--archive-notes "$SHIPPED_VERSION"');
+    }
+  });
+
+  it('archives under the version the release shipped', () => {
+    expect(postBump()).toMatch(
+      /^[ \t]*SHIPPED_VERSION: \$\{\{ steps\.current\.outputs\.version \}\}$/m
+    );
+  });
+});

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Resolve the GitHub Release title and body for one version from the hand-written notes in
-// release-notes/, for the "Create GitHub Release" step of .github/workflows/release.yml.
+// release-notes/next.md, for the "Create GitHub Release" step of .github/workflows/release.yml.
 //
 // The Release page shows the considered account of the release that sits in release-notes/, and
 // nothing else. It is never a list of merged pull requests: in this repo such a list is partial by
@@ -20,16 +20,19 @@
 // a release (the reason scripts/dist-tag.mjs avoids `semver`).
 //
 // The rules:
-//   - File name: `v` + the version with every dot replaced by an underscore, + `.md`, directly
-//     under release-notes/. So `2.0.0-beta.3` -> `release-notes/v2_0_0-beta_3.md`.
+//   - File: release-notes/next.md (OPS-59). The notes for the release in development accumulate
+//     there, a bullet per user-facing change, written before each change merges. The post-bump
+//     that follows a publish archives it as `v` + the shipped version with every dot replaced by an
+//     underscore + `.md` (`2.0.0-beta.3` -> `v2_0_0-beta_3.md`, see release-notes-archive.mjs) and
+//     opens a fresh one, so a release always reads the one file and never has to be told its name.
 //   - First line is an ATX H1 -> that line, minus the leading `# `, is the Release TITLE, and the
 //     line is removed from the body so the title is not repeated inside it. A single blank line
 //     immediately after it is dropped too.
 //   - A file that is nothing but its H1 -> that title and an EMPTY body. Intended, not a
 //     degenerate case: a release whose heading says everything needs no paragraph under it.
 //   - First line is not an H1 -> the title stays `v<version>` and the WHOLE file is the body.
-//   - No file for the version -> no body at all, and the caller creates the Release with an empty
-//     one. Nothing is synthesised to fill it.
+//   - No next.md -> no body at all, and the caller creates the Release with an empty one. Nothing
+//     is synthesised to fill it.
 //
 // The H1 is taken VERBATIM. It is not required to contain the version (release-notes/v0/v0_9_0.md
 // opens `# Gaunt Sloth Assistant v0.9.0 Release Notes`) and it may contain any markdown, including
@@ -40,8 +43,9 @@
 // CLI:
 //   node scripts/release-notes-for.mjs <version> [--dir <notes dir>] [--body-out <path>]
 // Writes the resolved body to --body-out when there is one, prints a summary on stdout, and — when
-// GITHUB_OUTPUT is set — appends the step outputs `title` and `body_file` (empty when the version
-// has no notes file, which is how the workflow tells the two apart).
+// GITHUB_OUTPUT is set — appends the step outputs `title` and `body_file` (empty when there is no
+// notes file, which is how the workflow tells the two apart). The version names the title when the
+// file has no H1.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,8 +58,12 @@ const REPO_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 /** The directory the release notes live in, used when --dir is not given. */
 export const DEFAULT_NOTES_DIR = join(REPO_ROOT, 'release-notes');
 
+/** The file the notes for the release in development accumulate in, under the notes directory. */
+export const NEXT_NOTES_FILE = 'next.md';
+
 /**
- * The notes file name for a version: `v` + the version with every dot replaced by an underscore.
+ * The ARCHIVED notes file name for a version: `v` + the version with every dot replaced by an
+ * underscore. What the post-bump renames next.md to once that version has shipped.
  * @param {string} version e.g. "2.0.0-beta.3"
  * @returns {string} e.g. "v2_0_0-beta_3.md"
  */
@@ -64,16 +72,12 @@ export function notesFileName(version) {
 }
 
 /**
- * The path to a version's notes file, or undefined when it does not exist.
- *
- * Only the flat path is searched. 0.x notes are archived one level down in release-notes/v0/, but
- * archiving happens long after a release ships, so a dispatch's own notes are always flat.
- * @param {string} version
+ * The path to the notes file a release publishes (next.md), or undefined when it does not exist.
  * @param {string} [notesDir]
  * @returns {string | undefined}
  */
-export function resolveNotesPath(version, notesDir = DEFAULT_NOTES_DIR) {
-  const path = join(notesDir, notesFileName(version));
+export function resolveNotesPath(notesDir = DEFAULT_NOTES_DIR) {
+  const path = join(notesDir, NEXT_NOTES_FILE);
   return existsSync(path) ? path : undefined;
 }
 
@@ -110,10 +114,13 @@ export function splitTitleAndBody(text, version) {
  *
  * @param {string} version
  * @param {string} [notesDir]
- * @returns {{ version: string, title: string, notesPath: string | undefined, body: string | undefined, notesMissing: boolean }}
+ * `bodyEmpty` is true when the file exists but carries nothing under its heading — what a fresh
+ * next.md looks like before any change has added a bullet. The Release then has a title and an
+ * empty body, exactly as for an H1-only file; the flag exists so the preflight can say so.
+ * @returns {{ version: string, title: string, notesPath: string | undefined, body: string | undefined, notesMissing: boolean, bodyEmpty: boolean }}
  */
 export function releaseNotesFor(version, notesDir = DEFAULT_NOTES_DIR) {
-  const notesPath = resolveNotesPath(version, notesDir);
+  const notesPath = resolveNotesPath(notesDir);
   if (!notesPath) {
     // Nobody wrote notes for this version, so there is no body — and none is invented. The caller
     // creates the Release with an empty body. Title still comes from here, so the workflow has one
@@ -124,10 +131,11 @@ export function releaseNotesFor(version, notesDir = DEFAULT_NOTES_DIR) {
       notesPath: undefined,
       body: undefined,
       notesMissing: true,
+      bodyEmpty: true,
     };
   }
   const { title, body } = splitTitleAndBody(readFileSync(notesPath, 'utf8'), version);
-  return { version, title, notesPath, body, notesMissing: false };
+  return { version, title, notesPath, body, notesMissing: false, bodyEmpty: body.trim() === '' };
 }
 
 /**
@@ -182,7 +190,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } else {
     process.stdout.write(
       `No release notes file for ${version} (looked for ` +
-        `${join(notesDir, notesFileName(version))}) — the Release will have an empty body.\n`
+        `${join(notesDir, NEXT_NOTES_FILE)}) — the Release will have an empty body.\n`
     );
     process.stdout.write(`title: ${result.title}\n`);
   }

@@ -18,11 +18,10 @@ import { fileURLToPath } from 'node:url';
  *
  * Three properties carry the node's acceptance, and the third is the one most easily lost:
  *
- *  - a version with NO notes file produces a warning naming the exact file that was looked for.
- *    The exact name is the point: the convention replaces every dot with an underscore, and a file
- *    named anything else resolves to nothing while the pipeline reports it only by shipping an
- *    empty body;
- *  - a version WITH a notes file produces no warning. This is the control — a warning that fires
+ *  - NO notes produce a warning naming the exact file that was looked for, release-notes/next.md
+ *    (OPS-59) — whether the file is absent or has nothing under its heading, which is what a fresh
+ *    next.md looks like before any change added a bullet;
+ *  - notes that ARE there produce no warning. This is the control — a warning that fires
  *    on every release is one nobody reads — and it is asserted positively (the confirmation names
  *    the file found) as well as negatively, because an empty output would satisfy "no warning" for
  *    the wrong reason;
@@ -42,9 +41,10 @@ const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const REAL_CORE_PACKAGE_JSON = join(REPO_ROOT, 'packages', 'core', 'package.json');
 const REAL_NOTES_DIR = join(REPO_ROOT, 'release-notes');
 
-/** A version certain to have no notes file, in any notes directory. */
+/** A version run against a notes directory with no next.md. */
 const VERSION_WITHOUT_NOTES = '99.0.0-nonesuch.1';
-const FILE_WITHOUT_NOTES = 'v99_0_0-nonesuch_1.md';
+/** The file the check looks for, whatever the version (OPS-59). */
+const FILE_WITHOUT_NOTES = 'next.md';
 
 const dirs: string[] = [];
 
@@ -95,7 +95,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
   });
 
   describe('the decision', () => {
-    it('warns, naming the exact file it looked for, when there is no notes file', async () => {
+    it('warns, naming the exact file it looked for, when there is no next.md', async () => {
       const { releaseNotesPreflight } = await import(HELPER);
       const dir = tempDir();
       const result = releaseNotesPreflight(VERSION_WITHOUT_NOTES, dir);
@@ -110,9 +110,9 @@ describe('scripts/release-notes-preflight.mjs', () => {
       expect(result.summary).toContain(FILE_WITHOUT_NOTES);
     });
 
-    it('stays silent for a version that HAS a notes file', async () => {
+    it('stays silent when next.md HAS notes', async () => {
       const { releaseNotesPreflight } = await import(HELPER);
-      const dir = tempDir({ 'v9_9_9.md': '# v9.9.9\n\nSomething shipped.\n' });
+      const dir = tempDir({ 'next.md': '# v9.9.9\n\nSomething shipped.\n' });
       const result = releaseNotesPreflight('9.9.9', dir);
 
       expect(result.notesMissing).toBe(false);
@@ -120,8 +120,62 @@ describe('scripts/release-notes-preflight.mjs', () => {
       expect(result.summary).toBeUndefined();
       // Asserted positively as well: `annotation === undefined` alone would be satisfied by a
       // function that decided nothing at all.
-      expect(result.notesPath).toBe(join(dir, 'v9_9_9.md'));
+      expect(result.notesPath).toBe(join(dir, 'next.md'));
       expect(result.confirmation).toContain('9.9.9');
+      expect(result.headingAnnotation).toBeUndefined();
+    });
+
+    it('warns when next.md has nothing under its heading', async () => {
+      const { releaseNotesPreflight, WARNING_TITLE } = await import(HELPER);
+      // The post-bump's fresh file, untouched: a release from it ships a title and a blank body.
+      const dir = tempDir({ 'next.md': '# v9.9.9\n' });
+      const result = releaseNotesPreflight('9.9.9', dir);
+
+      expect(result.notesMissing).toBe(false);
+      expect(result.notesPath).toBe(join(dir, 'next.md'));
+      expect(result.annotation.startsWith(`::warning title=${WARNING_TITLE}::`)).toBe(true);
+      expect(result.annotation).toContain('nothing under its heading');
+      expect(result.annotation).toContain('does NOT block');
+    });
+
+    describe('the heading', () => {
+      it('warns when it names a version other than the one shipping', async () => {
+        const { releaseNotesPreflight, HEADING_WARNING_TITLE } = await import(HELPER);
+        // The fresh file names the version the post-bump chose; a later explicit bump moves the
+        // version without touching the heading, and the Release would be titled for the old one.
+        const dir = tempDir({ 'next.md': '# v9.9.9\n\n- Something shipped.\n' });
+        const result = releaseNotesPreflight('10.0.0', dir);
+
+        expect(result.annotation).toBeUndefined();
+        expect(
+          result.headingAnnotation?.startsWith(`::warning title=${HEADING_WARNING_TITLE}::`)
+        ).toBe(true);
+        expect(result.headingAnnotation).toContain('v9.9.9');
+        expect(result.headingAnnotation).toContain('10.0.0');
+        expect(result.headingAnnotation).not.toContain('\n');
+      });
+
+      it('accepts a heading that names the shipping version, with or without a name after it', async () => {
+        const { releaseNotesPreflight } = await import(HELPER);
+        for (const heading of ['# v9.9.9', '# v9.9.9 The Considered Account']) {
+          const dir = tempDir({ 'next.md': `${heading}\n\n- Something shipped.\n` });
+          expect(releaseNotesPreflight('9.9.9', dir).headingAnnotation).toBeUndefined();
+        }
+      });
+
+      it('leaves a heading that names no version alone', async () => {
+        const { releaseNotesPreflight } = await import(HELPER);
+        const dir = tempDir({ 'next.md': '# The Considered Account\n\n- Something shipped.\n' });
+        expect(releaseNotesPreflight('9.9.9', dir).headingAnnotation).toBeUndefined();
+      });
+
+      it('reads a prerelease version in the heading whole', async () => {
+        const { titleVersion } = await import(HELPER);
+        expect(titleVersion('v2.0.0-beta.3 Name')).toBe('2.0.0-beta.3');
+        expect(titleVersion('v2.1.4')).toBe('2.1.4');
+        expect(titleVersion('v2.1')).toBeUndefined();
+        expect(titleVersion('Release v2.1.4')).toBeUndefined();
+      });
     });
 
     it('emits a warning annotation GitHub will render, on ONE line', async () => {
@@ -184,7 +238,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
     });
 
     it('exits 0 and emits NO warning when the shipping version has notes', () => {
-      const dir = tempDir({ 'v9_9_9.md': '# v9.9.9\n\nSomething shipped.\n' });
+      const dir = tempDir({ 'next.md': '# v9.9.9\n\nSomething shipped.\n' });
       const summaryFile = join(tempDir(), 'summary.md');
       const run = runCli(['--version', '9.9.9', '--dir', dir], { summaryFile });
 
@@ -195,8 +249,8 @@ describe('scripts/release-notes-preflight.mjs', () => {
       // Positive half of the control: the OK path is not silent, it confirms. A run page showing
       // neither this nor a warning is a broken mechanism, and that must be distinguishable from a
       // clean release.
-      expect(run.stdout).toContain('v9_9_9.md');
-      expect(run.summary).toContain('v9_9_9.md');
+      expect(run.stdout).toContain('next.md');
+      expect(run.summary).toContain('next.md');
     });
 
     it('checks the real repo against the real release-notes directory', () => {
@@ -207,7 +261,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
 
       expect(run.status).toBe(0);
       expect(run.stdout).toContain(version);
-      expect(run.stdout).toContain(`v${version.replaceAll('.', '_')}.md`);
+      expect(run.stdout).toContain('release-notes/next.md');
     });
 
     it('exits 0 when the notes directory does not exist', () => {
@@ -372,7 +426,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
 
       it('warns, naming the file, every offending link and the form it should have had', async () => {
         const { releaseNotesPreflight, LINK_WARNING_TITLE } = await import(HELPER);
-        const dir = tempDir({ 'v9_9_9.md': WITH_BAD_LINKS });
+        const dir = tempDir({ 'next.md': WITH_BAD_LINKS });
         const result = releaseNotesPreflight('9.9.9', dir, { repoUrl: REPO });
 
         expect(result.relativeLinks).toEqual([
@@ -383,7 +437,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
           true
         );
         // The file NAME, which is separator-free and so holds on win32 too.
-        expect(result.linkAnnotation).toContain('v9_9_9.md');
+        expect(result.linkAnnotation).toContain('next.md');
         expect(result.linkAnnotation).toContain('../docs/MIGRATION.md');
         expect(result.linkAnnotation).toContain('docs/COMMANDS.md');
         // The remedy, not just the complaint. Built with forward slashes on every platform.
@@ -392,13 +446,13 @@ describe('scripts/release-notes-preflight.mjs', () => {
         expect(result.linkAnnotation).not.toContain('\n');
         // It must say it is not a blocker, for the same reason the missing-notes warning does.
         expect(result.linkAnnotation).toContain('does NOT block');
-        expect(result.linkSummary).toContain('v9_9_9.md');
+        expect(result.linkSummary).toContain('next.md');
         expect(result.linkSummary).toContain(`${REPO}/blob/v9.9.9/docs/MIGRATION.md`);
       });
 
       it('does not disturb the OPS-123 control on the same path', async () => {
         const { releaseNotesPreflight } = await import(HELPER);
-        const dir = tempDir({ 'v9_9_9.md': WITH_BAD_LINKS });
+        const dir = tempDir({ 'next.md': WITH_BAD_LINKS });
         const result = releaseNotesPreflight('9.9.9', dir, { repoUrl: REPO });
 
         // The notes EXIST. `annotation` and `summary` are the missing-notes finding and must stay
@@ -412,7 +466,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
       it('stays silent for a notes file whose links are all absolute', async () => {
         const { releaseNotesPreflight } = await import(HELPER);
         const dir = tempDir({
-          'v9_9_9.md': `# v9.9.9\n\n- See [Migration](${REPO}/blob/v9.9.9/docs/MIGRATION.md).\n`,
+          'next.md': `# v9.9.9\n\n- See [Migration](${REPO}/blob/v9.9.9/docs/MIGRATION.md).\n`,
         });
         const result = releaseNotesPreflight('9.9.9', dir, { repoUrl: REPO });
 
@@ -421,7 +475,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
         // Asserted positively too: an empty `relativeLinks` from a scan that never ran would
         // satisfy the negative assertions for the wrong reason.
         expect(result.relativeLinks).toEqual([]);
-        expect(result.confirmation).toContain('v9_9_9.md');
+        expect(result.confirmation).toContain('next.md');
       });
 
       it('has nothing to check when there is no notes file', async () => {
@@ -472,7 +526,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
 
     describe('through the CLI — still never a reason a release does not ship', () => {
       it('exits 0 and emits the link warning', () => {
-        const dir = tempDir({ 'v9_9_9.md': '# v9.9.9\n\nSee [M](../docs/MIGRATION.md).\n' });
+        const dir = tempDir({ 'next.md': '# v9.9.9\n\nSee [M](../docs/MIGRATION.md).\n' });
         const summaryFile = join(tempDir(), 'summary.md');
         const run = runCli(['--version', '9.9.9', '--dir', dir], { summaryFile });
 
@@ -482,7 +536,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
         expect(run.summary).toContain('../docs/MIGRATION.md');
         // The confirmation that the notes were FOUND is still written: the link finding is a
         // second statement about a release that has its notes, not a replacement for the first.
-        expect(run.stdout).toContain('v9_9_9.md');
+        expect(run.stdout).toContain('next.md');
         expect(run.stdout).not.toContain('::warning title=Release notes missing::');
       });
 
@@ -505,7 +559,7 @@ describe('scripts/release-notes-preflight.mjs', () => {
         // A DIRECTORY standing where the file should be is the portable way to make the read
         // throw (EISDIR): `chmod 000` does not block a read on the Windows cells.
         const dir = tempDir();
-        mkdirSync(join(dir, 'v9_9_9.md'), { recursive: true });
+        mkdirSync(join(dir, 'next.md'), { recursive: true });
         const run = runCli(['--version', '9.9.9', '--dir', dir]);
         expect(run.status).toBe(0);
         expect(run.stdout).toContain('::notice title=Release notes preflight skipped::');
@@ -518,11 +572,11 @@ describe('scripts/release-notes-preflight.mjs', () => {
     it('is the repo release-notes/ directory', async () => {
       const { releaseNotesPreflight } = await import(HELPER);
       // Driven with no notes dir, so the default is what resolves. The real directory holds
-      // v1_0_0.md, so this also proves the default points somewhere real rather than at an empty
-      // path that would make every version look un-noted.
+      // next.md, so this also proves the default points somewhere real rather than at an empty
+      // path that would make every release look un-noted.
       const result = releaseNotesPreflight('1.0.0');
       expect(result.notesMissing).toBe(false);
-      expect(result.expectedPath).toBe(join(REAL_NOTES_DIR, 'v1_0_0.md'));
+      expect(result.expectedPath).toBe(join(REAL_NOTES_DIR, 'next.md'));
     });
   });
 });
