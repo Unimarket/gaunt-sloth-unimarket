@@ -189,4 +189,49 @@ describe('loadConfiguredEvalToolCoverage (BATCH-48)', () => {
       'evalToolCoverage.min is a percentage between 0 and 100'
     );
   });
+
+  // BATCH-51 — `reporters` is read by the same run-start pass, so a matrix suite (which builds no
+  // base config) gets the reporters of the config the run was started with.
+  describe('loadRunLevelEvalConfig reads reporters from the run-level config (BATCH-51)', () => {
+    it('reads reporters from the -i profile, and only when that profile is named', async () => {
+      writeProjectConfig({ llm: LLM_SPEC });
+      writeProfileConfig('mcp-eval-root', {
+        llm: LLM_SPEC,
+        evalToolCoverage: { min: 13 },
+        reporters: { teamcity: '@gaunt-sloth/eval-reporter-teamcity' },
+      });
+
+      const { loadRunLevelEvalConfig, initConfig } = await import('#src/config/loader.js');
+      const read = await loadRunLevelEvalConfig({ identityProfile: 'mcp-eval-root' });
+      expect(read).toEqual({
+        found: true,
+        layer: 'project',
+        evalToolCoverage: { min: 13 },
+        reporters: { teamcity: '@gaunt-sloth/eval-reporter-teamcity' },
+      });
+      const { setProjectDir } = await import('#src/utils/systemUtils.js');
+      setProjectDir(undefined);
+      const built = await initConfig({ identityProfile: 'mcp-eval-root' });
+      expect(read.reporters).toEqual(built.reporters);
+
+      setProjectDir(undefined);
+      expect(await loadRunLevelEvalConfig({})).toEqual({ found: true, layer: 'project' });
+    });
+
+    it('underlays the global config reporters the way a run does', async () => {
+      writeGlobalConfig({ llm: LLM_SPEC, reporters: { a: './global-a.mjs', b: './global-b.mjs' } });
+      writeProjectConfig({ llm: LLM_SPEC, reporters: { b: './project-b.mjs' } });
+
+      const { loadRunLevelEvalConfig } = await import('#src/config/loader.js');
+      const read = await loadRunLevelEvalConfig({});
+      expect(read.reporters).toEqual({ a: './global-a.mjs', b: './project-b.mjs' });
+    });
+
+    it('throws on malformed reporters, naming the key, rather than treating them as none', async () => {
+      writeProjectConfig({ llm: LLM_SPEC, reporters: { teamcity: 42 } });
+
+      const { loadRunLevelEvalConfig } = await import('#src/config/loader.js');
+      await expect(loadRunLevelEvalConfig({})).rejects.toThrow('Invalid reporters');
+    });
+  });
 });

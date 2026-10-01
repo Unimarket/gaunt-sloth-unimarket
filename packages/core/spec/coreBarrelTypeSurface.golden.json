@@ -692,6 +692,11 @@
       "arity": 0
     },
     {
+      "name": "RunLevelEvalConfig",
+      "file": "config/loader.d.ts",
+      "arity": 0
+    },
+    {
       "name": "ScopedPromptsEntry",
       "file": "config/types.d.ts",
       "arity": 0

@@ -97,11 +97,12 @@ export default createMyReporter;
 }
 ```
 
-An installed package is resolved by Node module resolution against **your project's**
-`node_modules`, honoring the package's `exports`. (Node resolves it via the `require` condition, so
-if you ship conditional `exports`, include a `require`/`default` entry, not `import` only.) A name
-that can't be resolved, a module that fails to import, or a default export that isn't a function is a
-harness error — `gth eval` exits `2`.
+An installed package is resolved by Node module resolution, honoring the package's `exports`: from
+**your project's** directory (the folder holding `.gsloth`) first, then from the directory `gth` was
+started in. (Node resolves it via the `require` condition, so if you ship conditional `exports`,
+include a `require`/`default` entry, not `import` only.) Only reporters selected with `--reporter`
+are loaded; for a selected one, a name that can't be resolved, a module that fails to import, or a
+default export that isn't a function is a harness error — `gth eval` exits `2`.
 
 **4. Watch out for output-format escaping.** A reporter that writes into a structured stream must
 escape every dynamic string, or a judge/assertion reason can corrupt the output. The JUnit reporter

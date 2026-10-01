@@ -28,6 +28,7 @@ import {
   findUndeliverableBinaryFormatIssues,
   findUnknownTopLevelKeys,
   formatConfigValidationError,
+  evalReportersSchema,
   evalToolCoverageSchema,
   formatDeprecatedConfigIssues,
   isRecordConfig,
@@ -1050,8 +1051,41 @@ export interface ConfiguredEvalToolCoverage {
 }
 
 /**
+ * BATCH-51 — the run-level `gth eval` settings {@link loadRunLevelEvalConfig} found in the run's
+ * BASE config. `found` and `layer` mean what they mean on {@link ConfiguredEvalToolCoverage}.
+ */
+export interface RunLevelEvalConfig {
+  /** Whether a base config exists for these overrides — a project/profile file, or a global one. */
+  found: boolean;
+  /** Which layer the run's base is: a discovered project/profile file, or the global config. */
+  layer?: 'project' | 'global';
+  /** The validated `evalToolCoverage` value, or `undefined` when the base config does not set it. */
+  evalToolCoverage?: EvalToolCoverageConfig;
+  /** The validated `reporters` map, or `undefined` when the base config does not set it. */
+  reporters?: Record<string, string>;
+}
+
+/**
  * BATCH-48 — the `evalToolCoverage` value of the run's BASE config, read once, before `gth eval`
- * runs any suite.
+ * runs any suite. A view of {@link loadRunLevelEvalConfig}, which reads every run-level eval setting
+ * through the one path described there.
+ */
+export async function loadConfiguredEvalToolCoverage(
+  commandLineConfigOverrides: CommandLineConfigOverrides
+): Promise<ConfiguredEvalToolCoverage> {
+  const { found, layer, evalToolCoverage } = await loadRunLevelEvalConfig(
+    commandLineConfigOverrides
+  );
+  return {
+    found,
+    ...(layer ? { layer } : {}),
+    ...(evalToolCoverage ? { value: evalToolCoverage } : {}),
+  };
+}
+
+/**
+ * BATCH-48 / BATCH-51 — the run-level `gth eval` settings (`evalToolCoverage`, `reporters`) of the
+ * run's BASE config, read once, before `gth eval` runs any suite.
  *
  * ## Why a reader, and not a config the eval command already builds
  *
@@ -1069,20 +1103,27 @@ export interface ConfiguredEvalToolCoverage {
  * `-g` + `-c` pair, a missing `-c` file, an explicitly named profile with no config of its own —
  * {@link findProjectConfigPath} would otherwise fall back to the plain config and the output would
  * name a profile the value did not come from), then the same discovery, the same `extends`
- * composition, and the same global underlay with the same `deepMerge`. The key has no
- * default and no CLI override, so the merge with `DEFAULT_CONFIG` cannot change it.
+ * composition, and the same global underlay with the same `deepMerge`. Neither key has a
+ * default or a CLI override, so the merge with `DEFAULT_CONFIG` cannot change them.
  *
- * ## Quiet about everything except its own key
+ * ## Quiet about everything except its own keys
  *
  * It does not validate the whole config: every suite's own `initConfig` does that and reports it,
- * and warning twice about one file is worse than not warning here. The one key it reads it
- * validates with `evalToolCoverageSchema` — the same rule the full parse applies — and a
- * malformed value THROWS: a floor that failed to parse must not quietly become no floor, because a
- * floor quietly skipped reports green forever over a run it never measured.
+ * and warning twice about one file is worse than not warning here. The keys it reads it validates
+ * with `evalToolCoverageSchema` and `evalReportersSchema` — the same rules the full parse applies —
+ * and a malformed value THROWS: a floor that failed to parse must not quietly become no floor,
+ * because a floor quietly skipped reports green forever over a run it never measured.
+ *
+ * ## Why reporters are read here too
+ *
+ * A matrix suite builds no base config, so reading `reporters` off a config a suite built meant
+ * reading the first identity's profile: a reporter registered in the `-i` profile was unknown to
+ * such a suite, and one registered in an identity's profile was used or not depending on the
+ * identity order. Reporters, like the floor, describe the run, not an identity.
  */
-export async function loadConfiguredEvalToolCoverage(
+export async function loadRunLevelEvalConfig(
   commandLineConfigOverrides: CommandLineConfigOverrides
-): Promise<ConfiguredEvalToolCoverage> {
+): Promise<RunLevelEvalConfig> {
   if (commandLineConfigOverrides.global && commandLineConfigOverrides.customConfigPath) {
     throw new ConfigDiscoveryError(CONFLICTING_CONFIG_SOURCES_MESSAGE);
   }
@@ -1138,17 +1179,28 @@ export async function loadConfiguredEvalToolCoverage(
     sourceLabel = globalRaw.label;
   }
 
-  if (raw.evalToolCoverage === undefined) {
-    return { found: true, layer };
+  const result: RunLevelEvalConfig = { found: true, layer };
+  if (raw.evalToolCoverage !== undefined) {
+    const parsed = evalToolCoverageSchema.safeParse(raw.evalToolCoverage);
+    if (!parsed.success) {
+      throw new ConfigDiscoveryError(
+        `Invalid evalToolCoverage in ${sourceLabel}:\n${formatConfigValidationError(parsed.error)}`,
+        { sourceLabel }
+      );
+    }
+    result.evalToolCoverage = parsed.data;
   }
-  const parsed = evalToolCoverageSchema.safeParse(raw.evalToolCoverage);
-  if (!parsed.success) {
-    throw new ConfigDiscoveryError(
-      `Invalid evalToolCoverage in ${sourceLabel}:\n${formatConfigValidationError(parsed.error)}`,
-      { sourceLabel }
-    );
+  if (raw.reporters !== undefined) {
+    const parsed = evalReportersSchema.safeParse(raw.reporters);
+    if (!parsed.success) {
+      throw new ConfigDiscoveryError(
+        `Invalid reporters in ${sourceLabel}:\n${formatConfigValidationError(parsed.error)}`,
+        { sourceLabel }
+      );
+    }
+    result.reporters = parsed.data;
   }
-  return { found: true, layer, value: parsed.data };
+  return result;
 }
 
 /**

@@ -64,7 +64,7 @@ vi.mock('@gaunt-sloth/core/config.js', async () => {
   return {
     ...actual,
     initConfig: mocks.initConfig,
-    loadConfiguredEvalToolCoverage: async () => ({ found: true, layer: 'project' as const }),
+    loadRunLevelEvalConfig: async () => ({ found: true, layer: 'project' as const }),
   };
 });
 vi.mock('@gaunt-sloth/core/utils/systemUtils.js', async () => {

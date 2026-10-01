@@ -302,6 +302,10 @@
           "kind": "function"
         },
         {
+          "name": "loadRunLevelEvalConfig",
+          "kind": "function"
+        },
+        {
           "name": "normalizeBuiltInTools",
           "kind": "function"
         },

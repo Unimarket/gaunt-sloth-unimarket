@@ -1,7 +1,15 @@
 import { Command } from 'commander';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -96,6 +104,8 @@ const systemUtilsMock = {
   setExitCode: vi.fn(),
   // BATCH-19: the project-dir base a config-relative reporter module path resolves against.
   getProjectDir: vi.fn(() => process.cwd()),
+  // BATCH-51: the directory gth was started in — the second place a reporter package is looked up.
+  getCurrentWorkDir: vi.fn(() => process.cwd()),
 };
 vi.mock('@gaunt-sloth/core/utils/systemUtils.js', () => systemUtilsMock);
 
@@ -118,9 +128,9 @@ const configMock = {
   // GS2-62: the pure judge-profile pre-check. Defaulted truthy in beforeEach so existing judge
   // tests clear the pre-check; the missing-profile test overrides it to undefined.
   resolveIdentityProfileConfigPath: vi.fn(),
-  // BATCH-48: the run-start reader of the base config's `evalToolCoverage`. Defaulted in
-  // beforeEach to "a base config exists and sets no floor", which is every run before this key.
-  loadConfiguredEvalToolCoverage: vi.fn(),
+  // BATCH-48 / BATCH-51: the run-start reader of the base config's `evalToolCoverage` and
+  // `reporters`. Defaulted in beforeEach to "a base config exists and sets neither".
+  loadRunLevelEvalConfig: vi.fn(),
 };
 vi.mock('@gaunt-sloth/core/config.js', () => configMock);
 
@@ -189,7 +199,7 @@ describe('evalCommand', () => {
     outputDir = mkdtempSync(join(tmpdir(), 'gth-eval-command-'));
 
     configMock.initConfig.mockResolvedValue({ ...mockConfig, llm: { ...mockConfig.llm } });
-    configMock.loadConfiguredEvalToolCoverage.mockResolvedValue({ found: true, layer: 'project' });
+    configMock.loadRunLevelEvalConfig.mockResolvedValue({ found: true, layer: 'project' });
     // BATCH-12: default every identity to "resolves" so a suite reaches the run; the two
     // identities-precondition tests override this per name to make one identity unresolvable.
     // A --judge profile is NOT pre-checked here — CFG-36 deleted that workaround, and a bad judge
@@ -1230,9 +1240,9 @@ cases:
         fileUtilsMock.importExternalFile.mockImplementation(
           (p: string) => import(pathToFileURL(p).href)
         );
-        configMock.initConfig.mockResolvedValue({
-          ...mockConfig,
-          llm: { ...mockConfig.llm },
+        configMock.loadRunLevelEvalConfig.mockResolvedValue({
+          found: true,
+          layer: 'project',
           reporters: { teamcity: '@gaunt-sloth/eval-reporter-teamcity' },
         });
 
@@ -1299,9 +1309,9 @@ cases:
       fileUtilsMock.importExternalFile.mockImplementation(
         (p: string) => import(pathToFileURL(p).href)
       );
-      configMock.initConfig.mockResolvedValue({
-        ...mockConfig,
-        llm: { ...mockConfig.llm },
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
         reporters: { mine: './customEvalReporter.mjs' },
       });
 
@@ -1330,19 +1340,28 @@ cases:
       expect(existsSync(join(outputDir, 'results.xml'))).toBe(false);
     });
 
-    it('a config reporter whose module fails to load is a harness error (exit 2)', async () => {
+    it('a SELECTED config reporter whose module fails to load is a harness error (exit 2)', async () => {
       systemUtilsMock.getProjectDir.mockReturnValue(process.cwd());
       fileUtilsMock.importExternalFile.mockRejectedValue(new Error('ENOENT: no such file'));
-      configMock.initConfig.mockResolvedValue({
-        ...mockConfig,
-        llm: { ...mockConfig.llm },
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
         reporters: { broken: './does-not-exist.mjs' },
       });
 
       const { evalCommand } = await import('#src/commands/evalCommand.js');
       const program = new Command();
       evalCommand(program, {});
-      await program.parseAsync(['na', 'na', 'eval', 'suite.yaml', '-o', outputDir]);
+      await program.parseAsync([
+        'na',
+        'na',
+        'eval',
+        'suite.yaml',
+        '-o',
+        outputDir,
+        '--reporter',
+        'text,broken',
+      ]);
 
       expect(systemUtilsMock.setExitCode).toHaveBeenCalledWith(2);
       expect(runSingleShot).not.toHaveBeenCalled();
@@ -1378,9 +1397,9 @@ cases:
         fileUtilsMock.importExternalFile.mockImplementation(
           (p: string) => import(pathToFileURL(p).href)
         );
-        configMock.initConfig.mockResolvedValue({
-          ...mockConfig,
-          llm: { ...mockConfig.llm },
+        configMock.loadRunLevelEvalConfig.mockResolvedValue({
+          found: true,
+          layer: 'project',
           reporters: { pkg: 'eval-reporter-fixture' },
         });
 
@@ -1413,9 +1432,9 @@ cases:
       // importExternalFile call (fail-fast), naming the specifier and suggesting installation.
       try {
         systemUtilsMock.getProjectDir.mockReturnValue(projectDir);
-        configMock.initConfig.mockResolvedValue({
-          ...mockConfig,
-          llm: { ...mockConfig.llm },
+        configMock.loadRunLevelEvalConfig.mockResolvedValue({
+          found: true,
+          layer: 'project',
           reporters: { missing: '@acme/eval-reporter-nope' },
         });
 
@@ -1442,6 +1461,215 @@ cases:
       } finally {
         rmSync(projectDir, { recursive: true, force: true });
       }
+    });
+
+    // BATCH-51: only the reporters `--reporter` selects are imported. A reporter registered for CI
+    // but not installed where the run happens must not fail a plain run.
+    it('a registered but UNSELECTED reporter is never loaded, so a broken one does not fail a plain run', async () => {
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
+        reporters: { broken: './does-not-exist.mjs', missing: '@acme/eval-reporter-nope' },
+      });
+
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync(['na', 'na', 'eval', 'suite.yaml', '-o', outputDir]);
+
+      expect(systemUtilsMock.setExitCode).not.toHaveBeenCalled();
+      expect(fileUtilsMock.importExternalFile).not.toHaveBeenCalled();
+      expect(consoleUtilsMock.display).toHaveBeenCalledWith('PASS  greets-politely');
+    });
+
+    it('an unknown --reporter name still lists the registered-but-unloaded config reporters', async () => {
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
+        reporters: { teamcity: '@acme/eval-reporter-nope' },
+      });
+
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync([
+        'na',
+        'na',
+        'eval',
+        'suite.yaml',
+        '-o',
+        outputDir,
+        '--reporter',
+        'bogus',
+      ]);
+
+      expect(systemUtilsMock.setExitCode).toHaveBeenCalledWith(2);
+      expect(runSingleShot).not.toHaveBeenCalled();
+      expect(fileUtilsMock.importExternalFile).not.toHaveBeenCalled();
+      const errorArgs = consoleUtilsMock.displayError.mock.calls.map((c) => c[0]).join('\n');
+      expect(errorArgs).toContain('unknown reporter "bogus"');
+      expect(errorArgs).toContain('teamcity');
+    });
+
+    // BATCH-51: a bare package that the project dir (the `.gsloth` folder) cannot resolve is looked
+    // up from the directory gth was started in — an eval project in a subfolder with its own
+    // node_modules. Real resolver, real packages on disk.
+    describe('package lookup falls back to the directory gth was started in', () => {
+      const PKG = 'eval-reporter-fallback-fixture';
+      const markerReporter = (marker: string) =>
+        `import { writeFileSync } from 'node:fs';
+         import { join } from 'node:path';
+         export default function () {
+           return {
+             onSuiteEnd(summary, ctx) {
+               writeFileSync(join(ctx.outputDir, 'fallback-reporter.json'), JSON.stringify({ from: '${marker}' }));
+             },
+           };
+         }`;
+      let projectDir: string;
+      let workDir: string;
+
+      beforeEach(() => {
+        projectDir = mkdtempSync(join(tmpdir(), 'gth-eval-proj-'));
+        // A sibling temp dir, not a child of projectDir, so the project dir's upward walk can never
+        // reach the work dir's node_modules by accident.
+        workDir = mkdtempSync(join(tmpdir(), 'gth-eval-cwd-'));
+        systemUtilsMock.getProjectDir.mockReturnValue(projectDir);
+        systemUtilsMock.getCurrentWorkDir.mockReturnValue(workDir);
+        fileUtilsMock.importExternalFile.mockImplementation(
+          (p: string) => import(pathToFileURL(p).href)
+        );
+        configMock.loadRunLevelEvalConfig.mockResolvedValue({
+          found: true,
+          layer: 'project',
+          reporters: { fb: PKG },
+        });
+      });
+
+      afterEach(() => {
+        rmSync(projectDir, { recursive: true, force: true });
+        rmSync(workDir, { recursive: true, force: true });
+      });
+
+      const runWithFb = async () => {
+        const { evalCommand } = await import('#src/commands/evalCommand.js');
+        const program = new Command();
+        evalCommand(program, {});
+        await program.parseAsync([
+          'na',
+          'na',
+          'eval',
+          'suite.yaml',
+          '-o',
+          outputDir,
+          '--reporter',
+          'fb',
+        ]);
+      };
+
+      it('resolves a reporter installed only under the work dir', async () => {
+        installReporterPackage(workDir, PKG, markerReporter('cwd'));
+
+        await runWithFb();
+
+        expect(systemUtilsMock.setExitCode).not.toHaveBeenCalled();
+        const marker = JSON.parse(readFileSync(join(outputDir, 'fallback-reporter.json'), 'utf8'));
+        expect(marker).toEqual({ from: 'cwd' });
+        // The import was of the work dir's copy. `resolve()` builds the expected path the way the
+        // OS spells it, so the comparison holds on Windows too.
+        const imported = String(fileUtilsMock.importExternalFile.mock.calls[0][0]);
+        expect(realpathSync(imported).startsWith(realpathSync(resolve(workDir)))).toBe(true);
+      });
+
+      it('the project dir stays first when both have the reporter installed', async () => {
+        installReporterPackage(projectDir, PKG, markerReporter('project'));
+        installReporterPackage(workDir, PKG, markerReporter('cwd'));
+
+        await runWithFb();
+
+        expect(systemUtilsMock.setExitCode).not.toHaveBeenCalled();
+        const marker = JSON.parse(readFileSync(join(outputDir, 'fallback-reporter.json'), 'utf8'));
+        expect(marker).toEqual({ from: 'project' });
+      });
+
+      it('names both directories it searched when neither has the reporter (exit 2)', async () => {
+        await runWithFb();
+
+        expect(systemUtilsMock.setExitCode).toHaveBeenCalledWith(2);
+        expect(runSingleShot).not.toHaveBeenCalled();
+        const errorArgs = consoleUtilsMock.displayError.mock.calls.map((c) => c[0]).join('\n');
+        expect(errorArgs).toContain(PKG);
+        expect(errorArgs).toContain(`"${projectDir}"`);
+        expect(errorArgs).toContain(`"${workDir}"`);
+      });
+    });
+
+    // BATCH-51: reporters are a RUN-LEVEL setting, read once from the config the run was started
+    // with — never from a matrix suite's first identity, which is all a matrix suite builds.
+    describe('reporters are read from the run-level config', () => {
+      const registerMine = () => {
+        const fixturesDir = fileURLToPath(new URL('./fixtures', import.meta.url));
+        systemUtilsMock.getProjectDir.mockReturnValue(fixturesDir);
+        fileUtilsMock.importExternalFile.mockImplementation(
+          (p: string) => import(pathToFileURL(p).href)
+        );
+      };
+      const runMatrixWithMine = async (overrides: { identityProfile?: string } = {}) => {
+        const { evalCommand } = await import('#src/commands/evalCommand.js');
+        const program = new Command();
+        evalCommand(program, overrides);
+        await program.parseAsync([
+          'na',
+          'na',
+          'eval',
+          'matrix.yaml',
+          '-o',
+          outputDir,
+          '--reporter',
+          'text,mine',
+        ]);
+      };
+
+      beforeEach(() => {
+        fileUtilsMock.readFileFromProjectDir.mockImplementation(() => MATRIX_HINT_SUITE);
+        runSingleShot.mockResolvedValue({ ok: true, answer: 'hello there', tools: [] });
+      });
+
+      it('a matrix suite gets the reporters of the -i profile, which no identity carries', async () => {
+        registerMine();
+        configMock.loadRunLevelEvalConfig.mockResolvedValue({
+          found: true,
+          layer: 'project',
+          reporters: { mine: './customEvalReporter.mjs' },
+        });
+
+        await runMatrixWithMine({ identityProfile: 'mcp-eval-root' });
+
+        expect(systemUtilsMock.setExitCode).not.toHaveBeenCalled();
+        const marker = JSON.parse(readFileSync(join(outputDir, 'mine-reporter.json'), 'utf8'));
+        expect(marker.total).toBe(2);
+        // Read once, for the run, from the invocation's own profile.
+        expect(configMock.loadRunLevelEvalConfig).toHaveBeenCalledTimes(1);
+        expect(configMock.loadRunLevelEvalConfig).toHaveBeenCalledWith(
+          expect.objectContaining({ identityProfile: 'mcp-eval-root' })
+        );
+      });
+
+      it("a reporter registered only in the first identity's profile is not used by the run", async () => {
+        registerMine();
+        configMock.initConfig.mockResolvedValue({
+          ...mockConfig,
+          llm: { ...mockConfig.llm },
+          reporters: { mine: './customEvalReporter.mjs' },
+        });
+
+        await runMatrixWithMine();
+
+        expect(systemUtilsMock.setExitCode).toHaveBeenCalledWith(2);
+        expect(runSingleShot).not.toHaveBeenCalled();
+        const errorArgs = consoleUtilsMock.displayError.mock.calls.map((c) => c[0]).join('\n');
+        expect(errorArgs).toContain('unknown reporter "mine"');
+      });
     });
   });
 
@@ -1737,7 +1965,7 @@ cases:
   /**
    * BATCH-48 — the run-level coverage floor, `evalToolCoverage` in gth config.
    *
-   * The floor is read ONCE, before any suite runs, by `loadConfiguredEvalToolCoverage` from the base
+   * The floor is read ONCE, before any suite runs, by `loadRunLevelEvalConfig` from the base
    * config the run was started with — the reader whose file-level behaviour (the `-i` profile versus
    * the project config) is pinned against real files in core's config.evalToolCoverage.spec. Here it
    * is stubbed, and every config a suite builds carries a DIFFERENT floor, so a floor read off a
@@ -1768,8 +1996,10 @@ cases:
     });
 
     const floor = (value: { min?: number; waive?: string[] } | undefined, found = true) => {
-      configMock.loadConfiguredEvalToolCoverage.mockResolvedValue(
-        found ? { found: true, layer: 'project', ...(value ? { value } : {}) } : { found: false }
+      configMock.loadRunLevelEvalConfig.mockResolvedValue(
+        found
+          ? { found: true, layer: 'project', ...(value ? { evalToolCoverage: value } : {}) }
+          : { found: false }
       );
     };
 
@@ -1841,7 +2071,7 @@ cases:
 
       await runEval(['suite.yaml'], { identityProfile: 'mcp-eval-root' });
 
-      expect(configMock.loadConfiguredEvalToolCoverage).toHaveBeenCalledWith(
+      expect(configMock.loadRunLevelEvalConfig).toHaveBeenCalledWith(
         expect.objectContaining({ identityProfile: 'mcp-eval-root' })
       );
       expect(displayed()).toContain(
@@ -1869,10 +2099,10 @@ cases:
 
     it('names the global config when the base is the global layer', async () => {
       fileUtilsMock.readFileFromProjectDir.mockImplementation(() => suiteCovering('read_file'));
-      configMock.loadConfiguredEvalToolCoverage.mockResolvedValue({
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
         found: true,
         layer: 'global',
-        value: { min: 80 },
+        evalToolCoverage: { min: 80 },
       });
 
       await runEval(['suite.yaml']);
@@ -1939,7 +2169,7 @@ cases:
 
       await runEval(['a.yaml', 'b.yaml']);
 
-      expect(configMock.loadConfiguredEvalToolCoverage).toHaveBeenCalledTimes(1);
+      expect(configMock.loadRunLevelEvalConfig).toHaveBeenCalledTimes(1);
       expect(builds).toBeGreaterThan(1);
       expect(displayed().filter((line) => line.startsWith('TOOL COVERAGE RUN'))).toEqual([
         'TOOL COVERAGE RUN: graded against evalToolCoverage.min 50% from the project config',
@@ -2068,7 +2298,7 @@ cases:
 
     it('a floor that fails to load is a harness error, and no suite runs', async () => {
       fileUtilsMock.readFileFromProjectDir.mockImplementation(() => suiteCovering('read_file'));
-      configMock.loadConfiguredEvalToolCoverage.mockRejectedValue(
+      configMock.loadRunLevelEvalConfig.mockRejectedValue(
         new Error(
           'Invalid evalToolCoverage: evalToolCoverage.min is a percentage between 0 and 100.'
         )
