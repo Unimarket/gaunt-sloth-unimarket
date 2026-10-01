@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // OPS-123 — tell the dispatcher, BEFORE anything is tagged or published, that the release about to
-// go out has no notes file and will therefore ship a blank GitHub Release body.
+// go out has no notes and will therefore ship a blank GitHub Release body. OPS-59: the notes are
+// release-notes/next.md, so "no notes" is that file missing, or carrying nothing under its heading
+// (a fresh next.md that no change has added a bullet to). It also warns when the heading names a
+// version other than the one shipping — a stale `# v<version>` would become the Release title.
 //
 // WHAT WENT WRONG WITHOUT IT. OPS-99 ruled that a version nobody wrote notes for ships a BLANK
 // body rather than a synthesised list of merged pull requests, because such a list here describes
@@ -82,7 +85,7 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { DEFAULT_NOTES_DIR, notesFileName, releaseNotesFor } from './release-notes-for.mjs';
+import { DEFAULT_NOTES_DIR, NEXT_NOTES_FILE, releaseNotesFor } from './release-notes-for.mjs';
 
 /** The repo root, one level up from scripts/. */
 const REPO_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -99,6 +102,20 @@ export const WARNING_TITLE = 'Release notes missing';
 
 /** The annotation title for the link finding. Distinct, so the two are told apart at a glance. */
 export const LINK_WARNING_TITLE = 'Release notes link check';
+
+/** The annotation title for a heading that names another version. */
+export const HEADING_WARNING_TITLE = 'Release notes heading';
+
+/**
+ * The version a notes title names, when it opens with a plain version (`v2.1.4`, `v2.1.4 Name`), or
+ * undefined for a title that does not start with one — a descriptive heading is the author's call.
+ * @param {string} title
+ * @returns {string | undefined}
+ */
+export function titleVersion(title) {
+  const match = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/.exec(String(title ?? ''));
+  return match ? match[1] : undefined;
+}
 
 /** The directory name a notes link is resolved against when naming its absolute form. */
 const NOTES_DIR_NAME = 'release-notes';
@@ -362,14 +379,24 @@ function linkFinding(notesPath, version, relativeLinks, base) {
  *   expectedPath: string, expectedDisplay: string, annotation: string | undefined,
  *   summary: string | undefined, confirmation: string,
  *   relativeLinks: Array<{ line: number, target: string }>,
- *   linkAnnotation: string | undefined, linkSummary: string | undefined }}
+ *   linkAnnotation: string | undefined, linkSummary: string | undefined,
+ *   headingAnnotation: string | undefined }}
  */
 export function releaseNotesPreflight(version, notesDir = DEFAULT_NOTES_DIR, options = {}) {
-  const { notesPath, notesMissing } = releaseNotesFor(version, notesDir);
-  const expectedPath = join(notesDir, notesFileName(version));
+  const { notesPath, notesMissing, bodyEmpty, title } = releaseNotesFor(version, notesDir);
+  const expectedPath = join(notesDir, NEXT_NOTES_FILE);
   const expectedDisplay = displayPath(expectedPath);
+  const named = notesMissing ? undefined : titleVersion(title);
+  const headingAnnotation =
+    named && named !== version
+      ? `::warning title=${HEADING_WARNING_TITLE}::${escapeData(
+          `${expectedDisplay} opens with "# ${title}", but this dispatch ships ${version}. The ` +
+            `heading becomes the Release title, so the page would be titled for the wrong ` +
+            `version. Correct the heading, or carry on if it is deliberate.`
+        )}`
+      : undefined;
 
-  if (!notesMissing) {
+  if (!notesMissing && !bodyEmpty) {
     const found = /** @type {string} */ (notesPath);
     // The WHOLE file, not the body `releaseNotesFor` returns: the body has the H1 removed, so its
     // line numbers would not be the ones in the file a dispatcher opens, and an unactionable line
@@ -391,37 +418,40 @@ export function releaseNotesPreflight(version, notesDir = DEFAULT_NOTES_DIR, opt
       relativeLinks,
       linkAnnotation: finding.annotation,
       linkSummary: finding.summary,
+      headingAnnotation,
     };
   }
 
+  const what = notesMissing
+    ? `There is no ${expectedDisplay}`
+    : `${expectedDisplay} has nothing under its heading`;
   const message =
-    `No release notes file for ${version} — looked for ${expectedDisplay}. This release will ` +
-    `publish with an EMPTY GitHub Release body. It does NOT block the release: write the file ` +
-    `and re-dispatch, or ship blank deliberately. The name is "v" + the version with every dot ` +
-    `replaced by an underscore, + ".md" — a file named anything else is not found.`;
+    `${what}, so ${version} will publish with an EMPTY GitHub Release body. It does NOT block ` +
+    `the release: add a bullet per user-facing change to ${expectedDisplay} and re-dispatch, or ` +
+    `ship blank deliberately.`;
 
   return {
     version,
-    notesMissing: true,
-    notesPath: undefined,
+    notesMissing,
+    notesPath,
     expectedPath,
     expectedDisplay,
     annotation: `::warning title=${WARNING_TITLE}::${escapeData(message)}`,
     summary:
       `## ⚠️ ${WARNING_TITLE} — this release would ship a blank body\n\n` +
-      `Nothing was found for version \`${version}\`.\n\n` +
-      `- **Looked for:** \`${expectedDisplay}\`\n` +
-      `- **Naming rule:** \`v\` + the version with every dot replaced by an underscore, + \`.md\`. ` +
-      `A file named anything else is not found, and the only sign of it is an empty Release page.\n` +
+      `${what}, so version \`${version}\` has no notes.\n\n` +
+      `- **The notes for a release accumulate in** \`${expectedDisplay}\`: a bullet per ` +
+      `user-facing change, written before the change merges.\n` +
       `- **This does not block the release.** A missing prose file must not stop a shipping fix. ` +
-      `Cancel and write \`${expectedDisplay}\` if the notes were simply forgotten; carry on if the ` +
-      `blank body is deliberate.\n`,
+      `Cancel and fill in \`${expectedDisplay}\` if the notes were simply forgotten; carry on if ` +
+      `the blank body is deliberate.\n`,
     confirmation: message,
-    // There is no file, so there is nothing to check the links of. The two findings are mutually
+    // There is no body, so there is nothing to check the links of. The two findings are mutually
     // exclusive by construction, not by accident.
     relativeLinks: [],
     linkAnnotation: undefined,
     linkSummary: undefined,
+    headingAnnotation,
   };
 }
 
@@ -449,6 +479,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stdout.write(`${result.confirmation}\n`);
     if (result.annotation) process.stdout.write(`${result.annotation}\n`);
     if (result.linkAnnotation) process.stdout.write(`${result.linkAnnotation}\n`);
+    if (result.headingAnnotation) process.stdout.write(`${result.headingAnnotation}\n`);
     if (process.env.GITHUB_STEP_SUMMARY) {
       const block =
         result.summary ??

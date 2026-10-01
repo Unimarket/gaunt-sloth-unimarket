@@ -303,23 +303,21 @@ pnpm install -g ./
 
 ## Release Notes
 
-Release notes are stored in `release-notes/` and follow a consistent format.
+The notes for the release in development live in `release-notes/next.md`.
 [release-notes/RELEASE-NOTES-HOWTO.md](release-notes/RELEASE-NOTES-HOWTO.md) is the full guide; the
 essentials are here.
 
 ### Writing Release Notes
 
-When creating release notes for a new version:
-
-1. **File naming**: `v` + the version with **every dot replaced by an underscore** + `.md`, so
-   `1.1.0` is `v1_1_0.md` and the prerelease `2.0.0-beta.3` is `v2_0_0-beta_3.md`
-2. **Title format**: `# v{version}` — the version alone. A descriptive suffix, as in
-   `# v2.0.0-beta.2 The Alignment Check`, is earned by a release carrying a new feature or a change
-   that is big **to someone using the tool**; work that was significant to the project and is a
-   non-event for a user keeps the flat heading
-3. **Length**: most files are three to seven lines of text. Concision is the default, not a fallback
-   for a release with little in it — and when something genuinely important ships, one or two
-   paragraphs for that feature is enough
+1. **Every user-facing change adds a bullet to `release-notes/next.md` before it merges** — part of
+   the pre-merge routine, beside the checks and reviews, not necessarily the same commit. Internal
+   work (refactors, tests, CI, docs-only changes) adds nothing. Whoever merges makes sure it is there
+2. **Title format**: the file opens with `# v{version}` — the version alone. A descriptive suffix, as
+   in `# v2.0.0-beta.2 The Alignment Check`, is earned by a release carrying a new feature or a
+   change that is big **to someone using the tool**; work that was significant to the project and is
+   a non-event for a user keeps the flat heading
+3. **Length**: one short bullet per change; most releases end at three to seven lines. When
+   something genuinely important ships, one or two paragraphs for that feature is enough
 4. **Style**: Keep language dry and factual, not excited or marketing-oriented
 5. **Links**: every link is a full `https://` URL pinned to that release's own tag. **Neither
    relative form works in both places a notes file is read.** On the Release page GitHub prepends
@@ -328,16 +326,21 @@ When creating release notes for a new version:
    `release-notes/`, so `docs/COMMANDS.md` means `release-notes/docs/COMMANDS.md`, which is not
    there. Each form is dead exactly where the other works; only an absolute URL survives both. See
    [release-notes/RELEASE-NOTES-HOWTO.md](release-notes/RELEASE-NOTES-HOWTO.md)
+6. **Hand-written notes for a big release** are written by rewriting `next.md`, never as a separate
+   `v<version>.md`
 
-**The release pipeline reads this file.** `scripts/release-notes-for.mjs` resolves it from the
-version being shipped: the `#` heading becomes the GitHub Release title and the rest becomes its
-body. A file named anything else is simply not found, and the Release ships with a **blank body** —
-nothing is synthesised to fill it. Write the notes before dispatching a release.
+**The release pipeline publishes `next.md`.** `scripts/release-notes-for.mjs` reads it: the `#`
+heading becomes the GitHub Release title and the rest becomes its body. With no `next.md`, or
+nothing under its heading, the Release ships with a **blank body** — nothing is synthesised to fill
+it. **After the publish, the post-bump archives it** as `v` + the shipped version with every dot
+replaced by an underscore + `.md` (`2.0.0-beta.3` → `v2_0_0-beta_3.md`) and opens a fresh `next.md`
+for the next version, in the same commit as the bump. **Nothing merges while a release is running**,
+or its bullet is archived under the version that just shipped.
 
 A dispatch that would ship blank says so before it publishes: `validate-inputs`, the release run's
-first job, runs `scripts/release-notes-preflight.mjs`, which warns and names the exact file it
-looked for. It never fails the run — a missing prose file must not stop a shipping fix — so the
-warning is information the dispatcher acts on, not a gate.
+first job, runs `scripts/release-notes-preflight.mjs`, which warns when `next.md` is missing or
+empty, or its heading names another version. It never fails the run — a missing prose file must not
+stop a shipping fix — so the warning is information the dispatcher acts on, not a gate.
 
 ### Structure
 

@@ -1,27 +1,40 @@
 # Release notes howto
 
-One file per released version, in this directory: `v` + the version with **every dot replaced by an
-underscore** + `.md`. So `1.1.0` is `v1_1_0.md` and the prerelease `2.0.0-beta.3` is
-`v2_0_0-beta_3.md`. Notes for the 0.x line are archived under `v0/`.
+**The notes for the release in development live in `next.md`.** Every change a user
+would notice adds a short bullet to it **before it merges**, as part of the same pre-merge routine
+as the checks and reviews — whoever merges makes sure it is there. Internal work (refactors, tests,
+CI) adds nothing. So the notes accumulate while the context exists, instead of being reconstructed
+from the git log at release time.
 
-**The release pipeline reads the file for the version being shipped.** Its `#` heading becomes the
-GitHub Release title and the rest becomes the Release body. A version with no file here gets a
-Release with a blank body — nothing is synthesised to fill it. So the notes are written before a
-release is dispatched.
+**The release pipeline publishes `next.md`.** Its `#` heading becomes the GitHub Release title and
+the rest becomes the Release body. With no `next.md`, or nothing under its heading, the Release has
+a blank body — nothing is synthesised to fill it.
+
+**After the publish, the post-bump archives it.** In the same commit that moves `main` to the next
+version, `next.md` is saved as `v` + the shipped version with **every dot replaced by an
+underscore** + `.md` (`1.1.0` → `v1_1_0.md`, `2.0.0-beta.3` → `v2_0_0-beta_3.md`), and a fresh
+`next.md` opens with the next version's heading. The archived files are the record of what each
+release said; nothing reads them at release time. Notes for the 0.x line are archived under `v0/`.
+
+**Do not merge into this repository while a release is running.** The post-bump archives the
+`next.md` on the commit that shipped; a bullet merged mid-release lands in the wrong version.
 
 **The pipeline says so before it publishes.** `validate-inputs`, the release run's first job, runs
-`scripts/release-notes-preflight.mjs` and raises a warning annotation naming the exact file it
-looked for. It warns and never blocks: a missing prose file must not stop a shipping fix, so the
-dispatcher decides whether to cancel and write the notes or let the blank body stand.
+`scripts/release-notes-preflight.mjs`, which warns when `next.md` is missing or has nothing under its
+heading, and when its heading names a version other than the one shipping. It warns and never
+blocks: a missing prose file must not stop a shipping fix, so the dispatcher decides whether to
+cancel and write the notes or let the blank body stand.
 
 ## Conventions
 
-- **The H1 is normally just the version**, as in `# v2.0.0-beta.3`. A descriptive suffix — as in
+- **The H1 is normally just the version**, as in `# v2.0.0-beta.3`, which is what a fresh `next.md`
+  opens with. A descriptive suffix — as in
   `# v2.0.0-beta.2 The Alignment Check` — is earned by a release carrying a new feature, or a change
   that is big **to someone using the tool**. Work that was significant to the project and is a
   non-event for a user keeps the flat heading.
-- **Most files are three to seven lines of text.** Concision is the default, not a fallback for a
-  release with little in it.
+- **One bullet per user-facing change**, from the user's side of it: what they can now do, or what
+  changed under them. Most releases end at three to seven lines. Concision is the default, not a
+  fallback for a release with little in it.
 - **Release notes are documentation.** When something genuinely important ships, one or two
   paragraphs for that feature is enough.
 
@@ -61,8 +74,8 @@ and nothing under it.
   worst direction — the link renders, is clickable, and looks right in the source and in every
   editor preview — so `validate-inputs` warns about one before anything is published, naming the
   file, the link and the URL it should have been. Like the missing-notes warning it never blocks.
-  This binds the `v<version>.md` files, which become Release bodies; a link in this howto is an
-  ordinary repository link and is relative as usual.
+  This binds `next.md`, which becomes a Release body, and so the archived `v<version>.md` files; a
+  link in this howto is an ordinary repository link and is relative as usual.
 
 ## Style
 
@@ -72,12 +85,14 @@ and other development-specific detail.
 
 ## Writing them
 
-1. Review the changes from the latest tag to HEAD.
-2. List this directory and read a few recent files.
-3. Write the file for the version in `packages/core/package.json` — the release ships the version
-   the repository is on now, and bumps to the next one afterwards
-   ([maintenance/RELEASE-HOWTO.md](../maintenance/RELEASE-HOWTO.md)).
-4. Present the notes to the user and ask for confirmation.
+- **For each change, before it merges:** if a user would notice it, add a bullet to `next.md`. Not
+  necessarily in the same commit as the change — it is part of the pre-merge routine, beside the
+  checks and reviews. A conflict in `next.md` between two merges is resolved by whoever merges.
+- **For a larger release that deserves a hand-written account:** rewrite `next.md` itself before
+  dispatching — sort it into sections, give it a descriptive heading. Never write a separate
+  `v<version>.md` for it: `next.md` is the only file a release reads, and the post-bump replaces an
+  archive of the same name with what was published.
+- **Before dispatching:** read `next.md` through once as a whole, and present it to the user.
 
 ## Structure
 
