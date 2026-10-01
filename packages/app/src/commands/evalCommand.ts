@@ -6,10 +6,10 @@ import { pathToFileURL } from 'node:url';
 import {
   CommandLineConfigOverrides,
   initConfig,
-  loadConfiguredEvalToolCoverage,
+  loadRunLevelEvalConfig,
   resolveIdentityProfileConfigPath,
 } from '@gaunt-sloth/core/config.js';
-import type { ConfiguredEvalToolCoverage, GthConfig } from '@gaunt-sloth/core/config.js';
+import type { GthConfig, RunLevelEvalConfig } from '@gaunt-sloth/core/config.js';
 import { getAskSystemPrompt } from '#src/commands/commandIntrospection.js';
 import {
   buildProductionRunCell,
@@ -23,7 +23,11 @@ import {
   displaySuccess,
   displayWarning,
 } from '@gaunt-sloth/core/utils/consoleUtils.js';
-import { getProjectDir, setExitCode } from '@gaunt-sloth/core/utils/systemUtils.js';
+import {
+  getCurrentWorkDir,
+  getProjectDir,
+  setExitCode,
+} from '@gaunt-sloth/core/utils/systemUtils.js';
 import {
   fileSafeLocalDate,
   getGslothFilePath,
@@ -114,26 +118,38 @@ export function isReporterFilePath(modulePath: string): boolean {
  *   in THEIR project, not in the CLI's install tree — via a `require` bound to the project dir
  *   (`createRequire`), which honors the package's `exports`. A plain `import(specifier)` would
  *   resolve against the CLI's own `node_modules` and only find what the CLI itself bundles.
+ *   BATCH-51: when the project dir cannot resolve it, the directory gth was started in is tried
+ *   next, so an eval project in a subfolder below the `.gsloth` folder (with its own
+ *   `node_modules`) finds the reporter it installed. The project dir stays first, so a reporter
+ *   installed at both levels resolves exactly as before.
  *
- * An unresolvable specifier (package not installed) throws a clear harness error naming it and
- * suggesting `npm i` — the caller wraps it into the per-suite harness error → exit 2.
+ * An unresolvable specifier (package not installed) throws a clear harness error naming it, the
+ * directories searched, and suggesting `npm i` — the caller wraps it into a harness error → exit 2.
  */
 export function resolveReporterModule(modulePath: string): string {
   const projectDir = getProjectDir();
   if (isReporterFilePath(modulePath)) {
     return resolve(projectDir, modulePath);
   }
-  // Bind `require` to a file INSIDE the project dir (it need not exist) so `require.resolve` walks
-  // the PROJECT's `node_modules`, not the CLI's.
-  const requireFromProject = createRequire(pathToFileURL(join(projectDir, 'noop.js')));
-  try {
-    return requireFromProject.resolve(modulePath);
-  } catch {
-    throw new Error(
-      `reporter package "${modulePath}" could not be resolved from this project — ` +
-        `install it (\`npm i -D ${modulePath}\`) or use a relative module path (\`./…\`).`
-    );
+  const searchDirs = [projectDir];
+  const workDir = getCurrentWorkDir();
+  if (resolve(workDir) !== resolve(projectDir)) searchDirs.push(workDir);
+  for (const dir of searchDirs) {
+    // Bind `require` to a file INSIDE the dir (it need not exist) so `require.resolve` walks THAT
+    // dir's `node_modules` and its parents', not the CLI's.
+    const requireFromDir = createRequire(pathToFileURL(join(dir, 'noop.js')));
+    try {
+      return requireFromDir.resolve(modulePath);
+    } catch {
+      // Not installed here; try the next directory.
+    }
   }
+  throw new Error(
+    `reporter package "${modulePath}" could not be resolved from ${searchDirs
+      .map((dir) => `"${dir}"`)
+      .join(' or ')} — ` +
+      `install it (\`npm i -D ${modulePath}\`) or use a relative module path (\`./…\`).`
+  );
 }
 
 /**
@@ -145,16 +161,24 @@ export function resolveReporterModule(modulePath: string): string {
  * separately-installed `@gaunt-sloth/eval-reporter-teamcity` package, registered via `reporters`
  * like any third-party reporter (it doubles as the worked example for writing one).
  *
- * Each config reporter's module STRING is resolved by {@link resolveReporterModule} — a file path
- * against the PROJECT dir, or a bare package specifier by node resolution against the PROJECT dir's
- * `node_modules` — then imported via `importExternalFile` (which turns the absolute path into a
- * `file://` URL and supports `.ts` through jiti). Its DEFAULT export must be an `EvalReporterFactory`
- * (`() => EvalReporter`); an unresolvable specifier, a missing file, a failed import, or a
- * non-function default export THROWS — caught by the command's outer try/catch → exit 2 (harness
- * error). It is the user's own trusted config (already arbitrary JS), so nothing is sandboxed.
+ * `registered` is the run-level `reporters` map (`loadRunLevelEvalConfig`), and only the
+ * entries whose name is in `selected` are loaded (BATCH-51): a reporter registered for CI but not
+ * installed on a laptop must not fail a plain `--reporter text` run. An unselected entry is still
+ * REGISTERED, under a factory that is never called, so the unknown-reporter message keeps listing
+ * every name the config declares without importing any of them.
+ *
+ * Each selected config reporter's module STRING is resolved by {@link resolveReporterModule} — a
+ * file path against the PROJECT dir, or a bare package specifier by node resolution from the PROJECT
+ * dir, then the directory gth was started in — then imported via `importExternalFile` (which turns
+ * the absolute path into a `file://` URL and supports `.ts` through jiti). Its DEFAULT export must
+ * be an `EvalReporterFactory` (`() => EvalReporter`); an unresolvable specifier, a missing file, a
+ * failed import, or a non-function default export THROWS — caught by the command's per-suite catch
+ * → exit 2 (harness error). It is the user's own trusted config (already arbitrary JS), so nothing
+ * is sandboxed.
  */
 async function buildCustomReporterFactories(
-  config: GthConfig
+  registered: Record<string, string> | undefined,
+  selected: readonly string[]
 ): Promise<Record<string, EvalReporterFactory>> {
   const custom: Record<string, EvalReporterFactory> = {};
 
@@ -162,7 +186,13 @@ async function buildCustomReporterFactories(
     await import('@gaunt-sloth/eval-reporter-junit/index.js');
   custom[JUNIT_REPORTER_NAME] = createJUnitReporter;
 
-  for (const [name, modulePath] of Object.entries(config.reporters ?? {})) {
+  for (const [name, modulePath] of Object.entries(registered ?? {})) {
+    if (!selected.includes(name)) {
+      custom[name] = () => {
+        throw new Error(`config reporter "${name}" was not selected, so it was not loaded.`);
+      };
+      continue;
+    }
     let mod: Record<string, unknown>;
     try {
       const absPath = resolveReporterModule(modulePath);
@@ -240,7 +270,7 @@ export interface RunToolCoverageResolution {
 /**
  * BATCH-48 — turn the base config's `evalToolCoverage` into the run floor, and name its source.
  *
- * **Once per run, from the base config only.** `loaded` is read by `loadConfiguredEvalToolCoverage`
+ * **Once per run, from the base config only.** `loaded` is read by `loadRunLevelEvalConfig`
  * before the suite loop, from the overrides the invocation was started with. It is never read off a
  * config a suite builds: configs are built per suite, a sweep cell deep-merges its own `config` onto
  * each, and a suite that declares `identities:` builds one config per identity. Reading the floor off
@@ -253,7 +283,7 @@ export interface RunToolCoverageResolution {
  */
 export function resolveRunToolCoverage(
   commandLineConfigOverrides: CommandLineConfigOverrides,
-  loaded: ConfiguredEvalToolCoverage
+  loaded: RunLevelEvalConfig
 ): RunToolCoverageResolution {
   // `-c` is checked first because it wins outright in the loader: with `-c` and `-i` both given,
   // the value comes from the `-c` file, and naming the profile would name a config never read.
@@ -265,7 +295,7 @@ export function resolveRunToolCoverage(
       : loaded.layer === 'global'
         ? { kind: 'global' }
         : { kind: 'project' };
-  const declared = loaded.value;
+  const declared = loaded.evalToolCoverage;
   const spec: RunToolCoverageSpec | undefined = declared
     ? { waive: declared.waive ?? [], ...(declared.min !== undefined ? { min: declared.min } : {}) }
     : undefined;
@@ -679,10 +709,12 @@ export function evalCommand(
         // before any suite runs. See `resolveRunToolCoverage` for why it is never read off a config
         // a suite builds. A malformed floor, or a `-i` / `-c` that does not resolve, throws here →
         // the outer catch → exit 2 with nothing run.
-        const runCoverage = resolveRunToolCoverage(
-          commandLineConfigOverrides,
-          await loadConfiguredEvalToolCoverage(commandLineConfigOverrides)
-        );
+        //
+        // BATCH-51 — the registered `reporters` are read in the same pass, for the same reason: a
+        // matrix suite builds one config per identity and no base config, so the reporters must
+        // come from the config the run was started with, never from whichever identity is first.
+        const runLevelConfig = await loadRunLevelEvalConfig(commandLineConfigOverrides);
+        const runCoverage = resolveRunToolCoverage(commandLineConfigOverrides, runLevelConfig);
 
         // The reporter selection (`--reporter`, else the default `['text']`) and the output ROOT are
         // invocation-level — the same for every suite. REPLACES the default: the `--reporter` value
@@ -699,9 +731,10 @@ export function evalCommand(
         //
         // Task B, Deliverable 2 — the `-i` papercut: a MATRIX suite (declares `identities:`) must run
         // with NO base `-i`. The per-identity configs come from the suite's `identities:` list (each
-        // pre-validated by the precondition below), so the base config used for reporters + the
-        // default judge is the FIRST identity's already-built config — the matrix path NEVER calls
-        // `initConfig` without an `identityProfile`. That is the fix: the old top-level
+        // pre-validated by the precondition below), so the base config used for the default judge
+        // is the FIRST identity's already-built config — the matrix path NEVER calls
+        // `initConfig` without an `identityProfile`. Reporters come from the run-level config
+        // (BATCH-51), not from this base config. That is the fix: the old top-level
         // `initConfig(overrides)` demanded a resolvable base config (a matrix-only project has none),
         // and failing there aborts the whole suite rather than the one cell. The
         // NON-matrix path is unchanged — the base config is still `initConfig(overrides)`. (Configs
@@ -752,9 +785,9 @@ export function evalCommand(
           } as const;
 
           // Build the SUT run function(s), selected by `target.type`, AND resolve the base config
-          // used for the reporters + the default (SUT-model) judge. The eval runner is
-          // target-agnostic — it just consumes an injected single-turn `runCell` and multi-turn
-          // `runConversation` — so the target only changes which builders produce them.
+          // used for the default (SUT-model) judge. The eval runner is target-agnostic — it just
+          // consumes an injected single-turn `runCell` and multi-turn `runConversation` — so the
+          // target only changes which builders produce them.
           let runCell: RunCellFn | undefined;
           let runConversation: RunConversationFn | undefined;
           let runCellByIdentity: Map<string, RunCellFn> | undefined;
@@ -769,7 +802,7 @@ export function evalCommand(
             // construction — a genuinely fresh `.llm`, never a structural clone), built ONCE per
             // identity and reused across cases by the runner. An identity profile's manual
             // `mcpServers.<n>.headers.Authorization` (CFG-4) flows through as-is. The base config for
-            // reporters + the default judge is the FIRST identity's config (reused, not rebuilt) — so
+            // the default judge is the FIRST identity's config (reused, not rebuilt) — so
             // this path makes NO `initConfig` call without an `identityProfile` (Deliverable 2).
             runCellByIdentity = new Map();
             runConversationByIdentity = new Map();
@@ -867,7 +900,12 @@ export function evalCommand(
           // collision). Reporters are re-resolved per suite so each suite gets fresh reporter state
           // (e.g. its own JUnit document). An unknown name throws (message lists the available
           // reporters) → per-suite catch → exit 2.
-          const customReporterFactories = await buildCustomReporterFactories(baseConfig);
+          // BATCH-51: the registry is the RUN-LEVEL `reporters` map, the same for every suite and
+          // every target type, and only the selected entries are imported.
+          const customReporterFactories = await buildCustomReporterFactories(
+            runLevelConfig.reporters,
+            reporterNames
+          );
           const reporters = resolveReporters(reporterNames, customReporterFactories);
 
           // BATCH-10 Task 2: resolve the judge identity profile (CLI `--judge` > suite `judge_profile`

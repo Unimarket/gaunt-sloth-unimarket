@@ -1228,6 +1228,13 @@ export const evalToolCoverageSchema = z.object({
 });
 
 /**
+ * BATCH-51 — the `reporters` value on its own, for the same reason as
+ * {@link evalToolCoverageSchema}: the run-start reader validates the key it reads with exactly the
+ * rule the full config parse applies.
+ */
+export const evalReportersSchema = z.record(z.string(), z.string());
+
+/**
  * Zod schema for the raw, on-disk Gaunt Sloth config. Loose at the top level so
  * unknown keys are preserved (warn-only via {@link findUnknownTopLevelKeys}).
  */
@@ -1513,10 +1520,12 @@ export const rawGthConfigSchema = z.looseObject({
   // threshold; `/autocompact` moves it for one session. See {@link autocompactSchema}.
   autocompact: autocompactSchema.optional(),
   // BATCH-19 — custom `gth eval` reporters. Maps a reporter NAME (as selected with
-  // `--reporter <name>`) to a MODULE PATH (relative to the project dir) whose default export is an
-  // `EvalReporterFactory` (`() => EvalReporter`). Registered through the same seam the bundled
-  // reporters use; a name here overrides a built-in of the same name.
-  reporters: z.record(z.string(), z.string()).optional(),
+  // `--reporter <name>`) to a MODULE PATH (relative to the project dir) or an installed package
+  // name, whose default export is an `EvalReporterFactory` (`() => EvalReporter`). Registered
+  // through the same seam the bundled reporters use; a name here overrides a built-in of the same
+  // name. A run-level setting: `gth eval` reads it from the config the run was started with (`-i`,
+  // `-c`, or the discovered config), never from a suite identity's profile.
+  reporters: evalReportersSchema.optional(),
   // GS2-33 — profile-backed subagents. Each entry names a subagent and the named config profile the
   // CHILD resolves when the parent spawns it, so a subagent can run under a different
   // model/tools/prompt than the parent. See {@link subagentSpecSchema}.

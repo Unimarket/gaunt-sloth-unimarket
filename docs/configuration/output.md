@@ -527,13 +527,25 @@ npm i -D @gaunt-sloth/eval-reporter-teamcity
 gth eval eval/js-basics.yaml --reporter text,teamcity
 ```
 
-A **package specifier** (`@scope/name` or `name`) is resolved by Node module resolution against your
-**project's** `node_modules`, honoring the package's `exports`; a value starting with `.`, `/`, or
-`file:` is a **module path** resolved relative to the project directory. Either way it loads through
-the same seam the built-ins use, so a name here can also override a built-in of the same name. An
-unresolvable package (not installed), a missing file, a failed import, or a default export that isn't
-a function is a harness error (`gth eval` exits 2). It runs as trusted code — it is your own config,
-which already executes arbitrary JS.
+A **package specifier** (`@scope/name` or `name`) is resolved by Node module resolution, honoring
+the package's `exports`: first from the **project directory** (the folder holding `.gsloth`), then,
+if it is not found there, from the **directory you started `gth` in** — so an eval project in a
+subfolder with its own `node_modules` finds the reporter it installed. A value starting with `.`,
+`/`, or `file:` is a **module path** resolved relative to the project directory. Either way it loads
+through the same seam the built-ins use, so a name here can also override a built-in of the same
+name. It runs as trusted code — it is your own config, which already executes arbitrary JS.
+
+**Only the reporters you select are loaded.** A reporter registered here but not named in
+`--reporter` is never imported, so registering a CI-only reporter does not break a local
+`--reporter text` run where it isn't installed. For a **selected** reporter, an unresolvable package
+(not installed), a missing file, a failed import, or a default export that isn't a function is a
+harness error (`gth eval` exits 2).
+
+**`reporters` is a run-level setting.** `gth eval` reads it once, from the config the run was started
+with — the `-i` profile, the `-c` file, or the discovered project config, with the global config
+underneath — and uses it for every suite. A suite with an `identities:` matrix uses the same
+reporters: an identity's own profile is never read for them, so register reporters in the `-i`
+profile (or the project config), not in the identity profiles.
 
 **Example external reporter — live TeamCity.**
 [`@gaunt-sloth/eval-reporter-teamcity`](https://www.npmjs.com/package/@gaunt-sloth/eval-reporter-teamcity)
