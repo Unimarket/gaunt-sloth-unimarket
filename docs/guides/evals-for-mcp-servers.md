@@ -140,6 +140,10 @@ Several content blocks arrive as the blocks, with the text one hop further in at
           - { tool: "mcp__unimarket__contract*", path: "structuredContent.contracts[0].type", contains: "SUPPLY" }
 ```
 
+`tool_args` grades the other side of the call: the arguments the agent sent, such as which
+organisation a search was scoped to. Its operators and failure wording are in
+[Tool-argument assertions](../COMMANDS.md#tool-argument-assertions).
+
 ### 5. A separate, stronger, non-MCP judge
 
 The `judge_profile: judge` above is its own profile directory too:

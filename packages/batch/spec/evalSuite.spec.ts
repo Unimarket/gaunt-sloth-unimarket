@@ -58,6 +58,7 @@ describe('parseEvalSuite', () => {
               jsonPath: [],
               mustError: [],
               toolResultJsonPath: [],
+              toolArgs: [],
               judgeRubric: undefined,
             },
           ],
@@ -1188,6 +1189,214 @@ cases:
     must_call: ["mcp__*"]
 `);
       expect(suite.cases[0].turns[0].expectations[0].mustCall).toEqual(['mcp__*']);
+    });
+  });
+
+  describe('tool_args', () => {
+    const suiteWith = (entries: string, target = '{ type: gth-agent }') => `
+target: ${target}
+cases:
+  - id: args
+    prompt: "find acme"
+    tool_args:
+${entries}
+`;
+
+    it('parses each operator into one normalized entry', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(
+        suiteWith(`      - { tool: "mcp__crm__*", path: "query", equals: "acme" }
+      - { tool: "mcp__crm__*", path: "cursor", equals: null }
+      - { tool: "mcp__crm__*", path: "query", contains: "cm" }
+      - { tool: "mcp__crm__*", path: "query", matches: "^ac" }
+      - { tool: "mcp__crm__*", path: "filters.state" }
+      - { tool: "mcp__crm__*", path: "limit", absent: true }
+      - { tool: "mcp__crm__*", path: "region", equals: "EU", every: true }`)
+      );
+      const block = suite.cases[0].turns[0].expectations[0];
+      expect(block.toolArgs).toEqual([
+        { tool: 'mcp__crm__*', path: 'query', equals: 'acme' },
+        { tool: 'mcp__crm__*', path: 'cursor', equals: null },
+        { tool: 'mcp__crm__*', path: 'query', contains: 'cm' },
+        { tool: 'mcp__crm__*', path: 'query', matches: /^ac/ },
+        { tool: 'mcp__crm__*', path: 'filters.state' },
+        { tool: 'mcp__crm__*', path: 'limit', absent: true },
+        { tool: 'mcp__crm__*', path: 'region', equals: 'EU', every: true },
+      ]);
+      // `matches` is compiled at parse time and stored as a RegExp.
+      expect(block.toolArgs[3].matches).toBeInstanceOf(RegExp);
+    });
+
+    it('defaults to [] when absent', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    must_contain: ["x"]
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolArgs).toEqual([]);
+    });
+
+    it('counts a tool_args-only block as having checks', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(suiteWith('      - { tool: "t", path: "q" }'));
+      expect(suite.cases[0].turns[0].expectations[0].toolArgs).toHaveLength(1);
+    });
+
+    it('parses inside a turn expect block', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: multi
+    turns:
+      - user: "find acme"
+        expect:
+          - tool_args:
+              - { tool: "search", path: "query", equals: "acme" }
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolArgs).toEqual([
+        { tool: 'search', path: 'query', equals: 'acme' },
+      ]);
+    });
+
+    it.each([
+      ['equals and contains', '{ tool: "t", path: "q", equals: "a", contains: "a" }'],
+      ['contains and matches', '{ tool: "t", path: "q", contains: "a", matches: "a" }'],
+      ['equals and absent', '{ tool: "t", path: "q", equals: "a", absent: true }'],
+    ])('rejects an entry with %s', async (_label, entry) => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() => parseEvalSuite(suiteWith(`      - ${entry}`))).toThrow(
+        'Invalid eval suite: case "args" (index 0) tool_args entry for "q" must set at most one ' +
+          'of "equals", "contains", "matches" or "absent" (none = existence check).'
+      );
+    });
+
+    it('rejects absent: false, naming what to do instead', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(suiteWith('      - { tool: "t", path: "q", absent: false }'))
+      ).toThrow(
+        'Invalid eval suite: case "args" (index 0) tool_args entry for "q" sets "absent: false" — ' +
+          'drop the key to check that the path resolves.'
+      );
+    });
+
+    it('rejects every: false, naming what to do instead', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(suiteWith('      - { tool: "t", path: "q", every: false }'))
+      ).toThrow(
+        'Invalid eval suite: case "args" (index 0) tool_args entry for "q" sets "every: false" — ' +
+          'drop the key; without it one matching call is enough.'
+      );
+    });
+
+    it('rejects an invalid matches regex at parse time, naming the pattern', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(suiteWith('      - { tool: "t", path: "q", matches: "(unclosed" }'))
+      ).toThrow(/tool_args entry for "q" has an invalid matches pattern "\(unclosed": /);
+    });
+
+    it.each([
+      ['equal', '{ tool: "t", path: "q", equal: "acme" }'],
+      ['contain', '{ tool: "t", path: "q", contain: "ac" }'],
+      ['exists', '{ tool: "t", path: "q", exists: true }'],
+    ])('rejects the unknown key "%s" instead of weakening the entry', async (key, entry) => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() => parseEvalSuite(suiteWith(`      - ${entry}`))).toThrow(
+        `cases.0.tool_args.0: tool_args entry for "q" (tool "t") has unknown key "${key}"; valid ` +
+          'keys are "tool", "path", "equals", "contains", "matches", "absent", "every"'
+      );
+    });
+
+    it('names every unknown key of an entry', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(suiteWith('      - { tool: "t", path: "q", equal: 1, contain: "a" }'))
+      ).toThrow(/has unknown keys "equal", "contain"; valid keys are /);
+    });
+
+    it('parses every valid key with every valid operator', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(
+        suiteWith(`      - { tool: "t", path: "a", every: true }
+      - { tool: "t", path: "b", equals: 1, every: true }
+      - { tool: "t", path: "c", contains: "x", every: true }
+      - { tool: "t", path: "d", matches: "x", every: true }
+      - { tool: "t", path: "e", absent: true, every: true }`)
+      );
+      expect(
+        suite.cases[0].turns[0].expectations[0].toolArgs.map(({ path, every }) => [path, every])
+      ).toEqual([
+        ['a', true],
+        ['b', true],
+        ['c', true],
+        ['d', true],
+        ['e', true],
+      ]);
+    });
+
+    it.each([
+      ['no tool pattern', '{ path: "q" }', /cases\.0\.tool_args\.0\.tool: /],
+      ['no path', '{ tool: "t" }', /cases\.0\.tool_args\.0\.path: /],
+      [
+        'an empty tool pattern',
+        '{ tool: "", path: "q" }',
+        /tool_args entry must have a non-empty tool pattern/,
+      ],
+      ['an empty path', '{ tool: "t", path: "" }', /tool_args entry must have a non-empty path/],
+      [
+        'a matches value that is not a string',
+        '{ tool: "t", path: "q", matches: 3 }',
+        /cases\.0\.tool_args\.0\.matches: /,
+      ],
+      [
+        'an absent value that is not a boolean',
+        '{ tool: "t", path: "q", absent: "yes" }',
+        /cases\.0\.tool_args\.0\.absent: /,
+      ],
+      [
+        'an every value that is not a boolean',
+        '{ tool: "t", path: "q", every: "yes" }',
+        /cases\.0\.tool_args\.0\.every: /,
+      ],
+    ])('rejects an entry with %s', async (_label, entry, message) => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() => parseEvalSuite(suiteWith(`      - ${entry}`))).toThrow(message);
+    });
+
+    it('treats tool_args as a flat assertion for flat-vs-expect exclusivity', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+identities: [admin]
+cases:
+  - id: c1
+    prompt: "p"
+    tool_args:
+      - { tool: "t", path: "q" }
+    expect:
+      - identities: [admin]
+        must_contain: ["x"]
+`)
+      ).toThrow(/declares BOTH case-level assertions and an `expect:` array/);
+    });
+
+    it.each([
+      ['ag-ui', '{ type: ag-ui, url: "http://localhost:3000", agent_id: gth }'],
+      ['adk-agent', '{ type: adk-agent, url: "http://localhost:8080" }'],
+    ])('rejects tool_args on an %s target', async (_label, target) => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() => parseEvalSuite(suiteWith('      - { tool: "t", path: "q" }', target))).toThrow(
+        'Invalid eval suite: case "args" uses `tool_args`, which requires target.type: gth-agent ' +
+          "(the arguments are recorded from the in-process agent's tool calls). Use content " +
+          'assertions, or a `gth-agent` target for argument grading.'
+      );
     });
   });
 });

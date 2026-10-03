@@ -401,7 +401,8 @@ export interface GthConfig {
    * **The recorded stage, not the other two.** `builtInTools.<tool>.maxOutputBytes` / `maxBytes`
    * cap what a tool returns to the model, and {@link toolOutputPreviewLines} caps what is drawn;
    * this caps what is stored, after the model has already seen the whole result. A longer payload
-   * is cut on a character boundary, and the record says so (`contentTruncated`).
+   * is cut on a character boundary, and the record says so (`contentTruncated`). The arguments
+   * recorded beside each result are capped by the same value (`argsTruncated`).
    *
    * A positive integer. `0` is rejected rather than read as "unlimited": {@link toolOutputPreviewLines}
    * uses `0` to mean the minimum, and the same number meaning the opposite here is the confusion

@@ -190,6 +190,7 @@ describe('GthAbstractAgent run-stats MCP error capture (BATCH-43 wiring)', () =>
         content: OBSERVED,
         // What an eval can now grade.
         errorPayload: BODY,
+        args: '{}',
       },
     ]);
   });
@@ -202,7 +203,7 @@ describe('GthAbstractAgent run-stats MCP error capture (BATCH-43 wiring)', () =>
     await agent.invoke([new HumanMessage('search the contracts')], runConfig);
 
     expect(agent.getRunStats().toolResults).toEqual([
-      { name: REGISTERED, isError: true, content: OBSERVED },
+      { name: REGISTERED, isError: true, content: OBSERVED, args: '{}' },
     ]);
   });
 

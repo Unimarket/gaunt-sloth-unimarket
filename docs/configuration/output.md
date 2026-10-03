@@ -244,7 +244,8 @@ under a tool's summary is capped by
 [`toolOutputPreviewLines`](#tool-output-preview-depth-tooloutputpreviewlines) above. This key caps
 what is **recorded** — the copy that lands in run stats and that `gth eval` grades — and the model
 has already seen the whole result by then. Setting it does not change the model's context, and it
-does not change the preview.
+does not change the preview. The same cap applies, separately, to the tool-call arguments recorded
+beside each result, which [`tool_args`](../COMMANDS.md#tool-argument-assertions) grades.
 
 The unit is UTF-8 bytes. The default is 8192, applied when the value is read, so a config that never
 sets the key records exactly what it recorded before and prints no new key. A longer payload is cut

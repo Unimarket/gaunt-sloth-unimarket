@@ -35,6 +35,7 @@ describe('runEvalSuite — classification', () => {
     jsonPath: [],
     mustError: [],
     toolResultJsonPath: [],
+    toolArgs: [],
     ...over,
   });
 

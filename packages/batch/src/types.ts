@@ -77,6 +77,16 @@ export interface ToolResultRecord {
    * is not gradable at all, because the adapter discards that before any of our code runs.
    */
   errorPayload?: string;
+  /**
+   * The arguments the model passed in the call this result answers, as JSON text, capped in UTF-8
+   * bytes at `toolResultCaptureMaxBytes`. `tool_args` grades this. Absent when capture matched no
+   * requested call to the result.
+   */
+  args?: string;
+  /** `true` iff {@link args} was cut by the capture cap. Absent when nothing was cut. */
+  argsTruncated?: boolean;
+  /** {@link args}' size in UTF-8 bytes before the cap cut it. Present only with {@link argsTruncated}. */
+  argsOriginalBytes?: number;
 }
 
 /** What one attempt at running a cell through the shared single-shot runtime produced. */
