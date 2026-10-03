@@ -1,0 +1,6 @@
+target: { type: gth-agent }
+cases:
+  - id: supplier-search
+    prompt: "Find supplier Acme"
+    must_call: ["mcp__demo__supplier_search"]
+    must_not_contain: ["INTERNAL-THOUGHT-LEAK"]
