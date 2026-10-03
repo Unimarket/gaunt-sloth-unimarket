@@ -9,6 +9,9 @@
  * that decides whether capture records final arguments: every chunk carries `tool_calls` parsed from
  * its own fragment alone. The spec therefore asserts the exact recorded text, once per call, in both
  * the written `results.json` and the per-case file.
+ *
+ * A call the model writes as text, which the agent promotes to a native call, is covered with
+ * streaming on and off.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -169,11 +172,12 @@ target: { type: gth-agent }
 cases:
   - id: right-args
     prompt: "look up acme"
-    must_call: ["lookup_*"]
+    must_call: ["lookup_customer"]
     tool_args:
-      - { tool: "lookup_*", path: "query", equals: "acme" }
+      - { tool: "lookup_customer", path: "query", equals: "acme" }
       - { tool: "lookup_customer", path: "filters.region", matches: "^EU$" }
-      - { tool: "lookup_customer", path: "limit", absent: true }
+      - { tool: "lookup_customer", path: "query", matches: "^(acme|globex)$", every: true }
+      - { tool: "lookup_customer", path: "limit", absent: true, every: true }
   - id: wrong-args
     prompt: "look up acme"
     tool_args:
@@ -299,8 +303,8 @@ describe('gth eval records tool-call arguments and grades tool_args', () => {
     expect(wrong.toolResults).toEqual(EXPECTED_TOOL_RESULTS);
     expect(wrong.verdict).toBe('FAIL');
     expect(wrong.reasons).toEqual([
-      'tool_args "query" (tool "lookup_customer"): lookup_customer: is "acme", expected ' +
-        '"initech"; lookup_customer: is "globex", expected "initech"',
+      'tool_args "query" (tool "lookup_customer"): is "acme", expected "initech"; is "globex", ' +
+        'expected "initech"',
     ]);
 
     expect(run.results).toMatchObject({ total: 2, passed: 1, failed: 1 });

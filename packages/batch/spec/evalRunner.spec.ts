@@ -391,17 +391,14 @@ describe('runEvalSuite tool-argument assertions', () => {
 
     expect(summary.cases[0].verdict).toBe('FAIL');
     expect(summary.cases[0].reasons).toEqual([
-      'tool_args "query" (tool "mcp__crm__*"): mcp__crm__search: is "globex", which does not ' +
-        'match /^acme$/',
+      'tool_args "query" (tool "mcp__crm__*"): does not match /^acme$/',
     ]);
     expect(classifyEvalExit(summary)).toBe(1);
   });
 
   it('FAILs when the cell recorded no tool results at all', async () => {
     const { runEvalSuite } = await import('#src/evalRunner.js');
-    const suite = makeSuite([
-      makeCase({ toolArgs: [{ tool: 'mcp__crm__*', path: 'query', exists: true }] }),
-    ]);
+    const suite = makeSuite([makeCase({ toolArgs: [{ tool: 'mcp__crm__*', path: 'query' }] })]);
 
     const summary = await runEvalSuite(suite, {
       runCell: runCellReturning({

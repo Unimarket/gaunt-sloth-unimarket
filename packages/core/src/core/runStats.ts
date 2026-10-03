@@ -396,8 +396,8 @@ export function accumulateMessage(
       // inferred later from the stored length (see {@link CappedToolResultText}). `contentTruncated`
       // is present only when the cap cut something, so a record that fitted is byte-identical to the
       // one this capture produced before the field existed.
-      // `args` is absent when no requested call carries this result's id. It is capped like
-      // `content`, under the same configured size.
+      // `args` is absent when no requested call carries this result's id. It is capped at the
+      // configured size.
       acc.toolResults.push({
         name: m.name,
         isError,

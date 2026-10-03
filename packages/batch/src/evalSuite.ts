@@ -111,18 +111,34 @@ const RawToolResultJsonPathCheckSchema = z.object({
   contains: z.string().optional(),
 });
 
-/** One `tool_args` entry. Exactly one operator is enforced in code. A strict object, because a
- * misspelt operator would otherwise be stripped in silence and leave an entry that asserts
- * nothing. */
-const RawToolArgsCheckSchema = z.strictObject({
-  tool: z.string().min(1, 'tool_args entry must have a non-empty tool pattern'),
-  path: z.string().min(1, 'tool_args entry must have a non-empty path'),
-  equals: z.unknown().optional(),
-  contains: z.string().optional(),
-  matches: z.string().optional(),
-  exists: z.boolean().optional(),
-  absent: z.boolean().optional(),
-});
+const TOOL_ARGS_KEYS = ['tool', 'path', 'equals', 'contains', 'matches', 'absent', 'every'];
+
+/** One `tool_args` entry. At most one operator is enforced in code; none is an existence check.
+ * A strict object, because a misspelt operator would otherwise be stripped in silence and weaken
+ * the entry to an existence check. */
+const RawToolArgsCheckSchema = z.strictObject(
+  {
+    tool: z.string().min(1, 'tool_args entry must have a non-empty tool pattern'),
+    path: z.string().min(1, 'tool_args entry must have a non-empty path'),
+    equals: z.unknown().optional(),
+    contains: z.string().optional(),
+    matches: z.string().optional(),
+    absent: z.boolean().optional(),
+    every: z.boolean().optional(),
+  },
+  {
+    error: (issue) => {
+      if (issue.code !== 'unrecognized_keys') return undefined;
+      const { tool, path } = (issue.input ?? {}) as { tool?: unknown; path?: unknown };
+      const keys = issue.keys.map((key) => `"${key}"`).join(', ');
+      return (
+        `tool_args entry for "${String(path)}" (tool "${String(tool)}") has unknown ` +
+        `${issue.keys.length === 1 ? 'key' : 'keys'} ${keys}; valid keys are ` +
+        TOOL_ARGS_KEYS.map((key) => `"${key}"`).join(', ')
+      );
+    },
+  }
+);
 
 /** The assertion bundle keys shared by a flat case and an `expect:` block. `expect:` blocks may also
  * carry `identities`; the flat case has no `identities` key (it always applies to every identity). */
@@ -407,12 +423,14 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * - An invalid `must_match`/`must_not_match` regex, or a `json_path` entry not setting exactly one
  *   of `equals`/`contains`, or a `tool_result_json_path` entry setting BOTH (at most one; neither
  *   is a pure existence check).
- * - A `tool_args` entry not setting exactly one of `equals`/`contains`/`matches`/`exists`/`absent`,
- *   setting `exists`/`absent` to anything but `true`, carrying an unknown key, or with an invalid
- *   `matches` regex.
- * - A tool-RESULT assertion (`must_error` / `tool_result_json_path` / `tool_args`, BATCH-21) against an
+ * - A `tool_args` entry carrying an unknown key, setting more than one of
+ *   `equals`/`contains`/`matches`/`absent` (none is a pure existence check), setting `absent` or
+ *   `every` to anything but `true`, or with an invalid `matches` regex.
+ * - A tool-RESULT assertion (`must_error` / `tool_result_json_path`, BATCH-21) against an
  *   `adk-agent` OR `ag-ui` target — tool results exist only on the in-process `gth-agent` target
  *   (the AG-UI wire streams call names but no result payloads; A2A exposes no tool trace at all).
+ * - A `tool_args` assertion against an `adk-agent` OR `ag-ui` target — the arguments are recorded
+ *   from the in-process agent's tool calls, so only the `gth-agent` target has them.
  * - A `"rater"` (BATCH-25 Half B) target missing its `rung`, naming one that is not on the approvals
  *   ladder, or carrying a `profile`; a `rater` suite with no `classification:` block (the classifier
  *   layer would be inert and every case would silently run through the ordinary agent); a `rater`
@@ -928,19 +946,22 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
     for (const evalCase of cases) {
       for (const turn of evalCase.turns) {
         for (const expectation of turn.expectations) {
-          if (
-            expectation.mustError.length > 0 ||
-            expectation.toolResultJsonPath.length > 0 ||
-            expectation.toolArgs.length > 0
-          ) {
+          if (expectation.mustError.length > 0 || expectation.toolResultJsonPath.length > 0) {
             throw new Error(
               `Invalid eval suite${suffix}: case "${evalCase.id}" uses \`must_error\`/` +
-                '`tool_result_json_path`/`tool_args` — tool-result assertions require target.type: gth-agent ' +
+                '`tool_result_json_path` — tool-result assertions require target.type: gth-agent ' +
                 `(only the in-process agent surfaces tool results; ${
                   target.type === 'ag-ui'
                     ? 'the AG-UI wire streams tool-call names only, with no result payload'
                     : "A2A does not expose the agent's tool trace at all"
                 }). Use content assertions, or a \`gth-agent\` target for tool-result grading.`
+            );
+          }
+          if (expectation.toolArgs.length > 0) {
+            throw new Error(
+              `Invalid eval suite${suffix}: case "${evalCase.id}" uses \`tool_args\`, which requires ` +
+                "target.type: gth-agent (the arguments are recorded from the in-process agent's " +
+                'tool calls). Use content assertions, or a `gth-agent` target for argument grading.'
             );
           }
         }
@@ -1672,11 +1693,12 @@ function parseExpectRated(raw: boolean | undefined, ctx: ExpectationContext): bo
 }
 
 /**
- * Validate one `tool_args` entry and normalize it to a {@link ToolArgsCheck} carrying exactly one
- * operator key, so the grader can discriminate on key presence (`equals: null` is a valid
- * operator). `exists`/`absent` accept only `true`: each `false` is the other operator, and two
- * spellings for one assertion would make a suite harder to read than it needs to be. A `matches`
- * pattern is compiled here, so an invalid one is a suite error rather than a run-time crash.
+ * Validate one `tool_args` entry and normalize it to a {@link ToolArgsCheck} carrying at most one
+ * operator key (none is a pure existence check), so the grader can discriminate on key presence
+ * (`equals: null` is a valid operator). `absent` and `every` accept only `true`: `absent: false`
+ * would be the existence check and `every: false` the default, so a second spelling for either
+ * would only make a suite harder to read. A `matches` pattern is compiled here, so an invalid one
+ * is a suite error rather than a run-time crash.
  */
 function parseToolArgsCheck(
   entry: z.infer<typeof RawToolArgsCheckSchema>,
@@ -1684,39 +1706,45 @@ function parseToolArgsCheck(
   ctx: ExpectationContext
 ): ToolArgsCheck {
   const prefix = `Invalid eval suite${ctx.suffix}: ${where} tool_args entry for "${entry.path}"`;
-  const operators = (['equals', 'contains', 'matches', 'exists', 'absent'] as const).filter(
+  const operators = (['equals', 'contains', 'matches', 'absent'] as const).filter(
     (key) => entry[key] !== undefined
   );
-  if (operators.length !== 1) {
+  if (operators.length > 1) {
     throw new Error(
-      `${prefix} must set exactly one of "equals", "contains", "matches", "exists" or "absent".`
+      `${prefix} must set at most one of "equals", "contains", "matches" or "absent" ` +
+        '(none = existence check).'
+    );
+  }
+  if (entry.absent === false) {
+    throw new Error(
+      `${prefix} sets "absent: false" — drop the key to check that the path resolves.`
+    );
+  }
+  if (entry.every === false) {
+    throw new Error(
+      `${prefix} sets "every: false" — drop the key; without it one matching call is enough.`
     );
   }
   const { tool, path } = entry;
+  const quantifier = entry.every ? { every: true as const } : {};
   switch (operators[0]) {
     case 'equals':
-      return { tool, path, equals: entry.equals };
+      return { tool, path, equals: entry.equals, ...quantifier };
     case 'contains':
-      return { tool, path, contains: entry.contains };
+      return { tool, path, contains: entry.contains, ...quantifier };
     case 'matches':
       try {
-        return { tool, path, matches: new RegExp(entry.matches!) };
+        return { tool, path, matches: new RegExp(entry.matches!), ...quantifier };
       } catch (error) {
         throw new Error(
           `${prefix} has an invalid matches pattern ${JSON.stringify(entry.matches)}: ` +
             (error instanceof Error ? error.message : String(error))
         );
       }
-    case 'exists':
-      if (entry.exists !== true) {
-        throw new Error(`${prefix} sets "exists: false" — use "absent: true" instead.`);
-      }
-      return { tool, path, exists: true };
     case 'absent':
-      if (entry.absent !== true) {
-        throw new Error(`${prefix} sets "absent: false" — use "exists: true" instead.`);
-      }
-      return { tool, path, absent: true };
+      return { tool, path, absent: true, ...quantifier };
+    default:
+      return { tool, path, ...quantifier };
   }
 }
 
