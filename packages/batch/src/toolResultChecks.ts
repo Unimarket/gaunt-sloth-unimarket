@@ -1,9 +1,8 @@
-import { isDeepStrictEqual } from 'node:util';
-
 import { toolNameMatchesPattern } from '@gaunt-sloth/core/utils/toolMatching.js';
 
 import { resolveJsonPath } from '#src/deterministicChecks.js';
 import type { EvalExpectation, ToolResultJsonPathCheck } from '#src/evalTypes.js';
+import { gradeMatchingResults, gradeResolvedValue } from '#src/toolCheckGrading.js';
 import type { ToolResultRecord } from '#src/types.js';
 
 /**
@@ -72,20 +71,11 @@ function checkToolResultJsonPath(
   check: ToolResultJsonPathCheck
 ): string | undefined {
   const label = `tool_result_json_path "${check.path}" (tool "${check.tool}")`;
-  const matching = toolResults.filter((result) => toolNameMatchesPattern(result.name, check.tool));
-  if (matching.length === 0) {
-    return `${label}: no result from a matching tool`;
-  }
-
-  // First-seen-order distinct reasons: with several matching results (a tool called N times), a
-  // repeated reason is reported once, and ANY passing result clears the whole check.
-  const reasons = new Set<string>();
-  for (const result of matching) {
-    const reason = evaluateResultAgainstCheck(result, check);
-    if (reason === undefined) return undefined;
-    reasons.add(reason);
-  }
-  return `${label}: ${[...reasons].join('; ')}`;
+  // With several matching results (a tool called N times), a repeated reason is reported once, and
+  // ANY passing result clears the whole check.
+  return gradeMatchingResults(toolResults, check.tool, label, (result) =>
+    evaluateResultAgainstCheck(result, check)
+  );
 }
 
 /**
@@ -146,26 +136,8 @@ function evaluateResultAgainstCheck(
     return 'path did not resolve';
   }
 
-  if (check.contains !== undefined) {
-    if (typeof value !== 'string') {
-      return `is ${JSON.stringify(value)} (contains check requires a string)`;
-    }
-    if (!value.includes(check.contains)) {
-      return `does not contain "${check.contains}"`;
-    }
-    return undefined;
-  }
-
-  // `equals` may legitimately be `null`, so discriminate on KEY presence (the parser normalizes
-  // the key out entirely for a pure existence check, and keeps it — possibly null-valued — when
-  // the suite set it).
-  if ('equals' in check) {
-    if (!isDeepStrictEqual(value, check.equals)) {
-      return `is ${JSON.stringify(value)}, expected ${JSON.stringify(check.equals)}`;
-    }
-    return undefined;
-  }
-
-  // Neither equals nor contains: a pure existence check — the resolved path is enough.
-  return undefined;
+  // Neither equals nor contains is a pure existence check: the resolved path is enough. The
+  // parser normalizes the `equals` key out entirely for it and keeps it, possibly null-valued,
+  // when the suite set it.
+  return gradeResolvedValue(value, check);
 }

@@ -343,17 +343,16 @@ export interface ToolResultJsonPathCheck {
 /**
  * One `tool_args` assertion: select recorded tool calls by name `tool` (exact or glob, the matcher
  * `must_call` uses), parse each call's recorded arguments as JSON, and resolve `path` against them
- * (the dot/`[index]` path `json_path` uses). Exactly one of the operators is set (enforced in
- * `evalSuite.js`'s parse):
+ * (the dot/`[index]` path `json_path` uses). At most one of the operators is set (enforced in
+ * `evalSuite.js`'s parse); none is a pure existence check:
  * - `equals` — the resolved value must deep-equal this (any JSON value, incl. `null`);
  * - `contains` — the resolved value must be a string containing this substring;
  * - `matches` — the resolved value must be a string this regex matches (compiled at parse time);
- * - `exists` — the path must resolve;
  * - `absent` — the path must not resolve.
  *
- * The assertion passes when AT LEAST ONE matching call satisfies it. Only calls that produced a
- * tool result are recorded, so a call without a result cannot satisfy it. Requires the
- * `gth-agent` target (rejected at parse time otherwise).
+ * The assertion passes when AT LEAST ONE matching call satisfies it, or, with `every`, when EVERY
+ * matching call does. Only calls that produced a tool result are recorded, so a call without a
+ * result cannot satisfy it. Requires the `gth-agent` target (rejected at parse time otherwise).
  */
 export interface ToolArgsCheck {
   /** Tool-name pattern (exact or glob) selecting which tool's call(s) to check. */
@@ -362,8 +361,9 @@ export interface ToolArgsCheck {
   equals?: unknown;
   contains?: string;
   matches?: RegExp;
-  exists?: true;
   absent?: true;
+  /** Every matching call must satisfy the assertion, not just one. */
+  every?: true;
 }
 
 /**
