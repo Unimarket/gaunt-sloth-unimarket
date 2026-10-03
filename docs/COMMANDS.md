@@ -560,6 +560,7 @@ These grade the agent's answer (and its tool trace). Use them at case level, ins
 | `json_path` | list | The answer parses as JSON and every entry holds. Each entry is `{ path, equals }` or `{ path, contains }` (exactly one), where `path` is a minimal dotted/indexed path (`$.items[0].scope`, `data.status`). |
 | `must_error` | string[] | For **each** pattern, at least one called tool matching it **returned an error** (the tool result's real error status, not text sniffing). Globs supported, same matcher as `must_call`. |
 | `tool_result_json_path` | list | Each entry is `{ tool, path }` plus optionally `equals` **or** `contains`. At least one result from a tool matching `tool` (glob) parses as JSON and `path` resolves in it (and matches `equals`/`contains` when set; neither = existence check). A non-JSON payload fails the entry. For a failed MCP call the payload graded is the server's own error body — see [Tool-result assertions](#tool-result-assertions). |
+| `tool_args` | list | Each entry is `{ tool, path }` plus exactly one of `equals`, `contains`, `matches` (a regex), `exists: true` or `absent: true`. At least one call to a tool matching `tool` (glob) was made with arguments that satisfy it. See [Tool-argument assertions](#tool-argument-assertions). |
 | `expect_label` | string | The classification the SUT produced equals this. The value must be one the suite's `classification.labels` declares. Requires a `classification` block. |
 | `expect_action` | string | The **action** the SUT produced equals this. Requires `classification.actions` **and** `classification.action_from`. |
 | `expect_rated` | `true` | A model actually rendered a verdict for this round — `model.label` is present. Asserts nothing about *which* verdict. `rater` target only, and not on a `model_free` case; see [Asserting that the rater answered](#asserting-that-the-rater-answered). |
@@ -592,6 +593,38 @@ The two result keys grade different things. `must_error` reads the result's erro
 A failed MCP call reaches the trace as the message the MCP adapter raises — `MCP tool 'report' on server 'contracts' returned an error:` followed by the server's own text — and the trace records that message unchanged, because it is what the model observed. `tool_result_json_path` grades the part after the prefix when the server's text is JSON, which is how the `code: forbidden` entry above passes. Two things are not gradable: a call whose tool name does not resolve to exactly one configured `mcpServers` key, and an error whose detail the server sent only in MCP `structuredContent` — `@langchain/mcp-adapters` discards structured content on the error path before gaunt-sloth sees the result, so only the text content ever arrives.
 
 Tool-result assertions read the in-process tool trace, so they require `target.type: gth-agent`; a suite using them with an `ag-ui` or `adk-agent` target is rejected before anything runs (exit `2`). Result payloads are recorded up to [`toolResultCaptureMaxBytes`](configuration/output.md#recorded-tool-result-size-toolresultcapturemaxbytes) (8192 UTF-8 bytes unless you set it). A longer payload is cut on a character boundary, and `tool_result_json_path` then fails it with a reason that names `toolResultCaptureMaxBytes` and the size the tool actually returned — a different reason from the one a payload that was never JSON gets, so a cut and a prose answer do not read as the same failure. An MCP error body over that size is not recovered at all rather than recovered half-cut, and the threshold moves with the key.
+
+#### Tool-argument assertions
+
+`must_call` proves a tool was called; `tool_args` proves it was called with the right arguments. To check that the agent searched for the customer the user named, and narrowed the search to the region they asked for:
+
+```yaml
+- id: search-acme-eu
+  prompt: "Find the customer Acme in the EU region."
+  must_call: ["mcp__crm__search"]
+  tool_args:
+    - { tool: "mcp__crm__search", path: "query", matches: "^[Aa]cme$" }
+    - { tool: "mcp__crm__search", path: "filters.region", equals: "EU" }
+    - { tool: "mcp__crm__search", path: "limit", absent: true }
+```
+
+Each entry selects calls by `tool` (an exact name or a glob, the matcher `must_call` uses), resolves `path` in the arguments the model passed (the same dotted/indexed path as `json_path`; `$` is the arguments themselves), and applies its one operator:
+
+- `equals` — the value deep-equals this (any JSON value, including `null`);
+- `contains` — the value is a string containing this substring;
+- `matches` — the value is a string this regular expression matches, case-sensitively as in `must_match`;
+- `exists: true` — the path resolves;
+- `absent: true` — the path does not resolve.
+
+The entry passes when **at least one** matching call satisfies it, so with several calls to one tool it asks whether any of them was made that way. It fails when no matching tool returned a result, and its failure names the tool that was called and the value its arguments held:
+
+```
+tool_args "filters.region" (tool "mcp__crm__search"): mcp__crm__search: is "US", expected "EU"
+```
+
+An entry must set exactly one operator, and an unknown key in it is rejected, so a misspelt `equal:` is a suite error rather than an entry that asserts nothing.
+
+The arguments are recorded on each tool result in `results.json` and the per-case files, as the JSON text the model sent, under `args`. A call is recorded only when a result for it arrives, and is paired with that result by its tool-call id. Arguments are capped at the same [`toolResultCaptureMaxBytes`](configuration/output.md#recorded-tool-result-size-toolresultcapturemaxbytes) as result payloads; a cut is recorded as `argsTruncated` with the original size in `argsOriginalBytes`, and `tool_args` fails such a call with a reason that names the key. Like the tool-result assertions, `tool_args` requires `target.type: gth-agent`.
 
 ### Identity matrix
 
