@@ -75,7 +75,7 @@ class ScriptedLookupModel extends BaseChatModel {
   bindTools(): unknown {
     return this;
   }
-  private calledTools(messages: BaseMessage[]): boolean {
+  protected calledTools(messages: BaseMessage[]): boolean {
     return messages.some((message) => ToolMessage.isInstance(message));
   }
   async _generate(messages: BaseMessage[]) {
@@ -134,6 +134,36 @@ class ScriptedLookupModel extends BaseChatModel {
   }
 }
 
+/**
+ * Writes its tool call as assistant text rather than as a native tool call. The agent's repair
+ * middleware promotes that text to a native call under the same message id, after the id has
+ * already been streamed as plain text.
+ */
+class TextEmittingLookupModel extends ScriptedLookupModel {
+  private textFor(messages: BaseMessage[]): string[] {
+    return this.calledTools(messages)
+      ? ['Acme is ', 'an EU customer.']
+      : ['[tool:lookup_customer]', '{"query":"acme"}'];
+  }
+  async _generate(messages: BaseMessage[]) {
+    const text = this.textFor(messages).join('');
+    return { generations: [{ message: new AIMessage(text), text }] };
+  }
+  async *_streamResponseChunks(
+    messages: BaseMessage[],
+    _options: this['ParsedCallOptions'],
+    runManager?: CallbackManagerForLLMRun
+  ) {
+    for (const text of this.textFor(messages)) {
+      const chunk = new ChatGenerationChunk({ text, message: new AIMessageChunk(text) });
+      await runManager?.handleLLMNewToken(text, undefined, undefined, undefined, undefined, {
+        chunk,
+      });
+      yield chunk;
+    }
+  }
+}
+
 const SUITE = `
 target: { type: gth-agent }
 cases:
@@ -148,6 +178,16 @@ cases:
     prompt: "look up acme"
     tool_args:
       - { tool: "lookup_customer", path: "query", equals: "initech" }
+`;
+
+const TEXT_EMITTED_SUITE = `
+target: { type: gth-agent }
+cases:
+  - id: text-emitted
+    prompt: "look up acme"
+    must_call: ["lookup_customer"]
+    tool_args:
+      - { tool: "lookup_customer", path: "query", equals: "acme" }
 `;
 
 const EXPECTED_TOOL_RESULTS = [
@@ -167,9 +207,9 @@ const EXPECTED_TOOL_RESULTS = [
 
 const projectDir = mkdtempSync(join(tmpdir(), 'gth-eval-tool-args-spec-'));
 
-function scriptedConfig(streamOutput: boolean): GthConfig {
+function scriptedConfig(streamOutput: boolean, llm: BaseChatModel): GthConfig {
   return {
-    llm: new ScriptedLookupModel(),
+    llm,
     streamOutput,
     contentSource: 'file',
     requirementSource: 'file',
@@ -187,14 +227,19 @@ function scriptedConfig(streamOutput: boolean): GthConfig {
 }
 
 /** Run the suite through the production eval path and return what it wrote. */
-async function runSuite(streamOutput: boolean, outputDir: string) {
+async function runSuite(
+  streamOutput: boolean,
+  outputDir: string,
+  suite: string = SUITE,
+  llm: BaseChatModel = new ScriptedLookupModel()
+) {
   const { parseEvalSuite } = await import('@gaunt-sloth/batch/evalSuite.js');
   const { runEvalSuite, classifyEvalExit } = await import('@gaunt-sloth/batch/evalRunner.js');
   const { writeEvalOutput } = await import('@gaunt-sloth/batch/evalOutput.js');
   const { buildProductionRunCell } = await import('#src/commands/batchCommand.js');
 
   const runCell = await buildProductionRunCell(
-    scriptedConfig(streamOutput),
+    scriptedConfig(streamOutput, llm),
     'PREAMBLE',
     {},
     {
@@ -206,15 +251,14 @@ async function runSuite(streamOutput: boolean, outputDir: string) {
       wrapPrefix: 'user message',
     }
   );
-  const summary = await runEvalSuite(parseEvalSuite(SUITE), { runCell });
+  const summary = await runEvalSuite(parseEvalSuite(suite), { runCell });
   writeEvalOutput(outputDir, summary);
 
   const read = (file: string) => JSON.parse(readFileSync(join(outputDir, file), 'utf8'));
   return {
     exit: classifyEvalExit(summary),
     results: read('results.json'),
-    rightArgs: read('right-args.json'),
-    wrongArgs: read('wrong-args.json'),
+    caseFile: (caseId: string) => read(`${caseId}.json`),
   };
 }
 
@@ -262,8 +306,8 @@ describe('gth eval records tool-call arguments and grades tool_args', () => {
     expect(run.results).toMatchObject({ total: 2, passed: 1, failed: 1 });
     expect(run.exit).toBe(1);
     // The per-case files carry the same records as the summary.
-    expect(run.rightArgs).toEqual(right);
-    expect(run.wrongArgs).toEqual(wrong);
+    expect(run.caseFile('right-args')).toEqual(right);
+    expect(run.caseFile('wrong-args')).toEqual(wrong);
   }, 60000);
 
   it('records the same arguments when the run does not stream', async () => {
@@ -275,4 +319,32 @@ describe('gth eval records tool-call arguments and grades tool_args', () => {
     ]);
     expect(run.results.cases.map((c: { verdict: string }) => c.verdict)).toEqual(['PASS', 'FAIL']);
   }, 60000);
+
+  describe.each([true, false])(
+    'a call the model wrote as text (streamOutput: %s)',
+    (streamOutput) => {
+      it('is promoted, run and recorded with its arguments', async () => {
+        const run = await runSuite(
+          streamOutput,
+          join(projectDir, `text-emitted-${streamOutput}`),
+          TEXT_EMITTED_SUITE,
+          new TextEmittingLookupModel()
+        );
+
+        expect(toolInvocations).toEqual([{ query: 'acme' }]);
+        const [textEmitted] = run.results.cases;
+        expect(textEmitted.toolResults).toEqual([
+          {
+            name: 'lookup_customer',
+            isError: false,
+            content: '{"customer":"acme","found":true}',
+            args: '{"query":"acme"}',
+          },
+        ]);
+        expect(textEmitted.verdict).toBe('PASS');
+        expect(textEmitted.reasons).toEqual([]);
+        expect(run.caseFile('text-emitted')).toEqual(textEmitted);
+      }, 60000);
+    }
+  );
 });

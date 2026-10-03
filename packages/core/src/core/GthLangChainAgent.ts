@@ -1055,6 +1055,9 @@ export class GthLangChainAgent extends GthAbstractAgent {
             promoted.tool_calls ?? []
           )}`
         );
+        // The streamed run has already seen this id as text, so it never reports the promoted
+        // message; record its calls here for the run stats.
+        this.recordPromotedToolCalls(promoted);
         // Replace-by-id (same id) so the reducer swaps the text message rather than appending.
         return { messages: [promoted] };
       },

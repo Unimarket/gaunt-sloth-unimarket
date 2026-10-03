@@ -128,6 +128,11 @@ export interface RunStatsAccumulator {
    * when a `ToolMessage` arrives, because providers restart the index at 0 every round.
    */
   streamingToolCalls: Map<number, PendingToolCall & { id?: string }>;
+  /**
+   * Ids of messages whose tool calls {@link accumulatePromotedToolCalls} already recorded, so the
+   * same message folded later through {@link accumulateMessage} is not recorded a second time.
+   */
+  promotedMessageIds: Set<string>;
 }
 
 /** A fresh, empty accumulator. */
@@ -140,6 +145,7 @@ export function createRunStatsAccumulator(): RunStatsAccumulator {
     toolResults: [],
     pendingToolCalls: new Map(),
     streamingToolCalls: new Map(),
+    promotedMessageIds: new Set(),
   };
 }
 
@@ -159,7 +165,8 @@ function queueToolCall(acc: RunStatsAccumulator, id: string, call: PendingToolCa
  *   open at their `index` until the round's results arrive.
  * - A delta whose `id` differs from the call open at its `index` starts a new call: a provider that
  *   sends no `index` puts every call of a round at 0.
- * - A message with no deltas carries complete `tool_calls`, recorded as they are.
+ * - A message with no deltas carries complete `tool_calls`, recorded as they are, unless the
+ *   message was already recorded as promoted.
  * - A call without an id cannot be correlated with a result and is not recorded.
  */
 function recordRequestedToolCalls(acc: RunStatsAccumulator, m: Record<string, unknown>): void {
@@ -186,6 +193,7 @@ function recordRequestedToolCalls(acc: RunStatsAccumulator, m: Record<string, un
 
   const toolCalls = m.tool_calls;
   if (!Array.isArray(toolCalls)) return;
+  if (typeof m.id === 'string' && acc.promotedMessageIds.has(m.id)) return;
   for (const tc of toolCalls) {
     const id = tc?.id;
     if (typeof id !== 'string' || id.length === 0) continue;
@@ -196,6 +204,32 @@ function recordRequestedToolCalls(acc: RunStatsAccumulator, m: Record<string, un
       /* fail-soft: an unserialisable `args` is recorded as no arguments */
     }
     queueToolCall(acc, id, { argsText });
+  }
+}
+
+/**
+ * Record the tool calls of an AI message the tool-call repair promoted from text, which keeps the
+ * id of the text message it replaces. A streamed run has already seen that id as plain text and
+ * never delivers the promoted message to {@link accumulateMessage}, so the agent hands it here
+ * when it promotes it.
+ *
+ * Records only the requested calls and their names: the message's usage was already counted from
+ * the text it replaces. The message is remembered by id, so a run that also folds the finished
+ * message (the non-streaming path) does not record its calls twice. Fail-soft.
+ */
+export function accumulatePromotedToolCalls(acc: RunStatsAccumulator, message: unknown): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const m = message as any;
+    if (!m || typeof m !== 'object' || !Array.isArray(m.tool_calls)) return;
+    for (const tc of m.tool_calls) {
+      const name = tc?.name;
+      if (typeof name === 'string' && name.length > 0) acc.tools.add(name);
+    }
+    recordRequestedToolCalls(acc, m);
+    if (typeof m.id === 'string') acc.promotedMessageIds.add(m.id);
+  } catch {
+    /* fail-soft: never let stats capture affect a run */
   }
 }
 
