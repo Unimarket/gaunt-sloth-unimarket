@@ -615,6 +615,10 @@
         }
       }
     },
+    "evalToolCallArgs": {
+      "description": "Record the arguments of every tool call in gth eval results and allow tool_call_json_path assertions. Arguments are written to the result files and reporters as the model sent them.",
+      "type": "boolean"
+    },
     "tui": {
       "type": "boolean"
     },

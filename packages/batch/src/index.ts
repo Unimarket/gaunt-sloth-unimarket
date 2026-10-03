@@ -11,12 +11,13 @@ export type {
   MatrixCell,
   MatrixRow,
   RunCellFn,
+  ToolCallRecord,
   ToolResultRecord,
 } from '#src/types.js';
 export { DEFAULT_CELL_CONCURRENCY } from '#src/types.js';
 
 // BATCH-2 — `gth eval`'s suite parsing, deterministic checks, judge, runner, and output writer.
-export { parseEvalSuite } from '#src/evalSuite.js';
+export { parseEvalSuite, suiteUsesToolCallArgs } from '#src/evalSuite.js';
 export { runDeterministicChecks } from '#src/deterministicChecks.js';
 export {
   judgeEvalCase,
@@ -44,6 +45,7 @@ export type {
   JudgeOutcome,
   JudgeVerdict,
   RunConversationFn,
+  ToolCallJsonPathCheck,
   TurnRunOutcome,
 } from '#src/evalTypes.js';
 export type { RunEvalSuiteOptions } from '#src/evalRunner.js';

@@ -259,6 +259,33 @@ uses `0` to mean the minimum, and the same number meaning the opposite here woul
 who wants no practical cap sets a large number, and the cost stays visible in the config. Negatives
 and fractions are rejected too — a byte budget is a positive whole number. The key is top level,
 because the cap applies to every recorded result, MCP ones included, rather than to one built-in tool.
+The same cap applies to tool-call arguments recorded with
+[`evalToolCallArgs`](#recorded-tool-call-arguments-evaltoolcallargs).
+
+## Recorded tool-call arguments (evalToolCallArgs)
+
+A `gth eval` suite needs to check what the agent asked a tool for, not only that it called it — the
+filter it passed to a search, the id it asked for. Set the key in the config the run is started with
+(the `-i` profile, the `-c` file or the project config):
+
+```json
+{ "evalToolCallArgs": true }
+```
+
+With it on, `gth eval` records every tool call's arguments in each case's `toolCalls` list and lets
+suites assert on them with
+[`tool_call_json_path`](../COMMANDS.md#tool-call-argument-assertions). Off (the default), a run
+records tool names and results only, and a suite using `tool_call_json_path` is refused.
+
+The arguments are written to `<case>.json` and `results.json`, and handed to every reporter, exactly
+as the model sent them, with nothing redacted. Keep evals away from production data and real credentials: anything the
+model puts in a tool call ends up in the eval output.
+
+The setting belongs to the run, like [`reporters`](#custom-eval-reporters-reporters): in a suite with an
+`identities:` matrix it is read from the config the run was started with, never from an identity's
+profile. Recorded arguments are capped by
+[`toolResultCaptureMaxBytes`](#recorded-tool-result-size-toolresultcapturemaxbytes) on the `gth-agent`
+target.
 
 ## Colour (useColour, NO_COLOR, FORCE_COLOR)
 

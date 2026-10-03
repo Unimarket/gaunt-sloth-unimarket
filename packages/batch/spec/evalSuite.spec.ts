@@ -58,6 +58,7 @@ describe('parseEvalSuite', () => {
               jsonPath: [],
               mustError: [],
               toolResultJsonPath: [],
+              toolCallJsonPath: [],
               judgeRubric: undefined,
             },
           ],
@@ -1188,6 +1189,119 @@ cases:
     must_call: ["mcp__*"]
 `);
       expect(suite.cases[0].turns[0].expectations[0].mustCall).toEqual(['mcp__*']);
+    });
+  });
+
+  // BATCH-52: the tool-call ARGUMENT assertion — parses like tool_result_json_path, counts as a
+  // check, is accepted on gth-agent and ag-ui, and is rejected where no tool calls are visible.
+  describe('BATCH-52 tool-call argument assertions', () => {
+    it('parses tool_call_json_path (equals / contains / existence) into camelCase', async () => {
+      const { parseEvalSuite, suiteUsesToolCallArgs } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: searched-open
+    prompt: "find open orders for laptops"
+    tool_call_json_path:
+      - { tool: "mcp__shop__search", path: "filters.status", equals: "open" }
+      - { tool: "mcp__shop__*", path: "query", contains: "laptop" }
+      - { tool: "mcp__shop__search", path: "filters" }
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolCallJsonPath).toEqual([
+        { tool: 'mcp__shop__search', path: 'filters.status', equals: 'open' },
+        { tool: 'mcp__shop__*', path: 'query', contains: 'laptop' },
+        { tool: 'mcp__shop__search', path: 'filters' },
+      ]);
+      expect(suiteUsesToolCallArgs(suite)).toBe(true);
+    });
+
+    it('defaults to [] and reports the suite as not using argument assertions', async () => {
+      const { parseEvalSuite, suiteUsesToolCallArgs } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    must_call: ["mcp__*"]
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolCallJsonPath).toEqual([]);
+      expect(suiteUsesToolCallArgs(suite)).toBe(false);
+    });
+
+    it('finds an argument assertion buried in a later turn’s identity block', async () => {
+      const { parseEvalSuite, suiteUsesToolCallArgs } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+identities: [admin]
+cases:
+  - id: multi
+    turns:
+      - user: "hi"
+        must_contain: ["hello"]
+      - user: "now search"
+        expect:
+          - identities: [admin]
+            tool_call_json_path:
+              - { tool: "search", path: "query" }
+`);
+      expect(suiteUsesToolCallArgs(suite)).toBe(true);
+    });
+
+    it('rejects an entry setting BOTH equals and contains', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "t", path: "a.b", equals: "x", contains: "y" }
+`)
+      ).toThrow(
+        /tool_call_json_path entry for "a\.b" must set at most one of "equals" or "contains"/
+      );
+    });
+
+    it('rejects an entry missing its tool pattern', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "", path: "a" }
+`)
+      ).toThrow(/tool_call_json_path entry must have a non-empty tool pattern/);
+    });
+
+    it('accepts it on an ag-ui target, whose wire streams each call’s arguments', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: ag-ui, url: "http://localhost:3000", agent_id: gth }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "search", path: "query", contains: "laptop" }
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolCallJsonPath).toHaveLength(1);
+    });
+
+    it('rejects it on an adk-agent target, which exposes no tool calls', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: adk-agent, url: "http://localhost:8080" }
+cases:
+  - id: searched
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "search", path: "query" }
+`)
+      ).toThrow(/case "searched" uses `tool_call_json_path`.*A2A does not expose them/s);
     });
   });
 });

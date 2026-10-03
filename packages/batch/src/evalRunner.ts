@@ -1,8 +1,14 @@
 import { runBatchMatrix } from '#src/BatchRunner.js';
 import { runDeterministicChecks } from '#src/deterministicChecks.js';
-import { runToolCallChecks } from '#src/toolChecks.js';
+import { runToolCallArgChecks, runToolCallChecks } from '#src/toolChecks.js';
 import { runToolResultChecks } from '#src/toolResultChecks.js';
-import type { CellResult, MatrixCell, RunCellFn, ToolResultRecord } from '#src/types.js';
+import type {
+  CellResult,
+  MatrixCell,
+  RunCellFn,
+  ToolCallRecord,
+  ToolResultRecord,
+} from '#src/types.js';
 import type {
   ClassifyOutcome,
   EvalCase,
@@ -679,6 +685,7 @@ async function gradeApplicableBlocks(
   answer: string,
   tools: string[],
   toolResults: ToolResultRecord[],
+  toolCalls: ToolCallRecord[],
   applicable: EvalExpectation[],
   passThreshold: number,
   judge: JudgeFn | undefined,
@@ -701,6 +708,9 @@ async function gradeApplicableBlocks(
     // third input kind, graded by its own checker (#src/toolResultChecks.js) and merged into the
     // same `reasons` so they drive the same PASS/FAIL/exit contract.
     const toolResultFailures = runToolResultChecks(toolResults, block);
+    // BATCH-52 tool-call ARGUMENT assertions read the captured calls' arguments — recorded only
+    // when the run opted in, which the command checks before any suite using them runs.
+    const toolCallArgFailures = runToolCallArgChecks(toolCalls, block);
     // BATCH-25 classification assertions read the cell's CLASSIFICATION (a fourth input kind,
     // beside the answer, the tool trace and the tool results), so they are graded by their own
     // checker and merged into the same `reasons` — the same PASS/FAIL/exit contract as every other
@@ -711,6 +721,7 @@ async function gradeApplicableBlocks(
       ...checks.failures,
       ...toolFailures,
       ...toolResultFailures,
+      ...toolCallArgFailures,
       ...classificationFailures
     );
 
@@ -764,6 +775,9 @@ async function gradeUnit(
     // BATCH-21: threaded parallel to `tools`; `undefined` for a runner that captured none, so a
     // pre-BATCH-21 cell's `<id>.json` keeps its exact keys (JSON.stringify drops undefined).
     toolResults: cellResult.toolResults,
+    // BATCH-52: present only when the run opted in (`evalToolCallArgs`); otherwise `undefined`, so
+    // the `<id>.json` of a run that did not opt in keeps its exact keys.
+    toolCalls: cellResult.toolCalls,
     durationMs: cellResult.durationMs,
     // BATCH-25 — omitted entirely (not set to `undefined`) for a non-classifier suite, so a
     // pre-BATCH-25 `<id>.json` keeps its exact key set.
@@ -797,10 +811,12 @@ async function gradeUnit(
   const answer = cellResult.answer ?? '';
   const tools = cellResult.tools ?? [];
   const toolResults = cellResult.toolResults ?? [];
+  const toolCalls = cellResult.toolCalls ?? [];
   const { reasons, deterministicFailures, judgeOutcome } = await gradeApplicableBlocks(
     answer,
     tools,
     toolResults,
+    toolCalls,
     applicable,
     evalCase.passThreshold,
     judge,
@@ -885,6 +901,7 @@ async function gradeConversationUnit(
         tokensOutput: outcome?.tokensOutput,
         tools: outcome?.tools,
         toolResults: outcome?.toolResults,
+        toolCalls: outcome?.toolCalls,
         ok: false,
         verdict: 'FAIL',
         reasons: [detail],
@@ -898,10 +915,12 @@ async function gradeConversationUnit(
     const answer = outcome.answer ?? '';
     const tools = outcome.tools ?? [];
     const toolResults = outcome.toolResults ?? [];
+    const toolCalls = outcome.toolCalls ?? [];
     const { reasons, deterministicFailures, judgeOutcome } = await gradeApplicableBlocks(
       answer,
       tools,
       toolResults,
+      toolCalls,
       applicable,
       evalCase.passThreshold,
       judge,
@@ -916,6 +935,7 @@ async function gradeConversationUnit(
       tokensOutput: outcome.tokensOutput,
       tools: outcome.tools,
       toolResults: outcome.toolResults,
+      toolCalls: outcome.toolCalls,
       ok: true,
       verdict: turnVerdict,
       checks: { passed: deterministicFailures.length === 0, failures: deterministicFailures },

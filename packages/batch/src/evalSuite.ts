@@ -78,6 +78,8 @@ import type { ToolCoverageSpec } from '#src/toolCoverage.js';
  *     must_error: [ "mcp__unimarket__*" ]       # BATCH-21: a matching called tool RETURNED an error
  *     tool_result_json_path:                    # BATCH-21: over a matching tool RESULT's payload
  *       - { tool: "mcp__unimarket__*", path: "code", equals: "ACCESS_DENIED" }
+ *     tool_call_json_path:                      # BATCH-52: over a matching call's ARGUMENTS (opt-in)
+ *       - { tool: "mcp__unimarket__search", path: "status", equals: "open" }
  *     judge: "Answers with a ranked summary and correctly formatted values."
  *     pass_threshold: 7
  *   # Matrix case — per-identity expectations:
@@ -108,6 +110,15 @@ const RawToolResultJsonPathCheckSchema = z.object({
   contains: z.string().optional(),
 });
 
+/** BATCH-52 — one `tool_call_json_path` entry: the `tool_result_json_path` shape, read against a
+ * matching call's arguments. Same at-most-one `equals`/`contains` rule, enforced in code. */
+const RawToolCallJsonPathCheckSchema = z.object({
+  tool: z.string().min(1, 'tool_call_json_path entry must have a non-empty tool pattern'),
+  path: z.string().min(1, 'tool_call_json_path entry must have a non-empty path'),
+  equals: z.unknown().optional(),
+  contains: z.string().optional(),
+});
+
 /** The assertion bundle keys shared by a flat case and an `expect:` block. `expect:` blocks may also
  * carry `identities`; the flat case has no `identities` key (it always applies to every identity). */
 const RawAssertionsSchema = z.object({
@@ -122,6 +133,8 @@ const RawAssertionsSchema = z.object({
   // BATCH-21 tool-RESULT assertions (gth-agent target only, enforced after normalization below).
   must_error: z.array(z.string()).optional(),
   tool_result_json_path: z.array(RawToolResultJsonPathCheckSchema).optional(),
+  // BATCH-52 tool-call ARGUMENT assertion (opt-in via `evalToolCallArgs`; not adk-agent / rater).
+  tool_call_json_path: z.array(RawToolCallJsonPathCheckSchema).optional(),
   // BATCH-25 CLASSIFICATION assertions. They sit in the assertion bundle — not on the case — so
   // they inherit identity scoping AND per-turn scoping for free; a multi-round negotiation case
   // needs a different expected action per round, which a case-level field could not express.
@@ -330,6 +343,8 @@ const FLAT_ASSERTION_KEYS = [
   'json_path',
   'must_error',
   'tool_result_json_path',
+  // BATCH-52 — listed for the same exclusivity reasons as every key here.
+  'tool_call_json_path',
   // BATCH-25 — the classification assertions MUST be listed here. This array drives BOTH the
   // flat-vs-`expect:` exclusivity check and the multi-turn "case-level assertions are rejected"
   // check; omitting them would let a suite declare both surfaces and have one silently ignored.
@@ -392,6 +407,9 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * - A tool-RESULT assertion (`must_error` / `tool_result_json_path`, BATCH-21) against an
  *   `adk-agent` OR `ag-ui` target — tool results exist only on the in-process `gth-agent` target
  *   (the AG-UI wire streams call names but no result payloads; A2A exposes no tool trace at all).
+ * - A `tool_call_json_path` (BATCH-52) entry setting both `equals` and `contains`, or used against
+ *   an `adk-agent` target (A2A exposes no tool calls). The `evalToolCallArgs` opt-in is checked by
+ *   the command ({@link suiteUsesToolCallArgs}), since it is run-level config, not suite content.
  * - A `"rater"` (BATCH-25 Half B) target missing its `rung`, naming one that is not on the approvals
  *   ladder, or carrying a `profile`; a `rater` suite with no `classification:` block (the classifier
  *   layer would be inert and every case would silently run through the ordinary agent); a `rater`
@@ -411,6 +429,20 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * @param yamlText Raw suite file content.
  * @param sourcePath Optional path, only used to make error messages more actionable.
  */
+/**
+ * BATCH-52 — whether any case in `suite` asserts on tool-call arguments (`tool_call_json_path`).
+ * The command refuses such a suite unless the run-level config opts in with `evalToolCallArgs`,
+ * because without it no arguments are recorded and every such assertion would fail for a reason
+ * that has nothing to do with the model.
+ */
+export function suiteUsesToolCallArgs(suite: EvalSuite): boolean {
+  return suite.cases.some((evalCase) =>
+    evalCase.turns.some((turn) =>
+      turn.expectations.some((expectation) => expectation.toolCallJsonPath.length > 0)
+    )
+  );
+}
+
 export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite {
   const suffix = sourcePath ? ` (${sourcePath})` : '';
 
@@ -923,6 +955,25 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
     }
   }
 
+  // BATCH-52 — the A2A wire carries no tool calls at all, so an argument assertion against an
+  // `adk-agent` target could never be graded. The AG-UI wire streams each call's arguments
+  // (`TOOL_CALL_ARGS`), so `ag-ui` grades it like `gth-agent`.
+  if (target.type === 'adk-agent') {
+    for (const evalCase of cases) {
+      for (const turn of evalCase.turns) {
+        for (const expectation of turn.expectations) {
+          if (expectation.toolCallJsonPath.length > 0) {
+            throw new Error(
+              `Invalid eval suite${suffix}: case "${evalCase.id}" uses \`tool_call_json_path\`, ` +
+                "which needs the agent's tool calls — A2A does not expose them. Use a " +
+                '`gth-agent` or `ag-ui` target for tool-call argument grading.'
+            );
+          }
+        }
+      }
+    }
+  }
+
   // BATCH-25 Half B — the honest boundary for the `rater` target: it runs NO agent and calls NO
   // tool, so there is no tool trace and there are no tool results. `must_not_call` would pass
   // vacuously against the empty trace (the silent false green an eval must never produce) and
@@ -936,11 +987,13 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
             expectation.mustCall.length > 0 ||
             expectation.mustNotCall.length > 0 ||
             expectation.mustError.length > 0 ||
-            expectation.toolResultJsonPath.length > 0
+            expectation.toolResultJsonPath.length > 0 ||
+            expectation.toolCallJsonPath.length > 0
           ) {
             throw new Error(
               `Invalid eval suite${suffix}: case "${evalCase.id}" uses a tool assertion ` +
-                '(`must_call` / `must_not_call` / `must_error` / `tool_result_json_path`), which a ' +
+                '(`must_call` / `must_not_call` / `must_error` / `tool_result_json_path` / ' +
+                '`tool_call_json_path`), which a ' +
                 '"rater" target cannot carry — it rates a command string and never runs an agent, ' +
                 'so there is no tool trace to grade (and a vacuous pass is worse than no ' +
                 'assertion). Grade the rating with `expect_label` / `expect_action`, or the ' +
@@ -1751,6 +1804,21 @@ function buildExpectation(
     return { tool: entry.tool, path: entry.path };
   });
 
+  // BATCH-52 tool-call ARGUMENT assertions — the same entry rules as tool_result_json_path.
+  const toolCallJsonPath = (raw.tool_call_json_path ?? []).map((entry) => {
+    const hasEquals = entry.equals !== undefined;
+    const hasContains = entry.contains !== undefined;
+    if (hasEquals && hasContains) {
+      throw new Error(
+        `Invalid eval suite${ctx.suffix}: ${where} tool_call_json_path entry for ` +
+          `"${entry.path}" must set at most one of "equals" or "contains" (neither = existence check).`
+      );
+    }
+    if (hasContains) return { tool: entry.tool, path: entry.path, contains: entry.contains };
+    if (hasEquals) return { tool: entry.tool, path: entry.path, equals: entry.equals };
+    return { tool: entry.tool, path: entry.path };
+  });
+
   // BATCH-25 classification assertions. Validated against the suite's declared enums HERE (not
   // later) so a typo'd label is a suite error rather than a case that can never pass.
   const expectLabel = raw.expect_label?.trim() || undefined;
@@ -1808,6 +1876,7 @@ function buildExpectation(
     jsonPath.length > 0 ||
     mustError.length > 0 ||
     toolResultJsonPath.length > 0 ||
+    toolCallJsonPath.length > 0 ||
     // BATCH-25 — a classification case whose ONLY assertion is `expect_label`/`expect_action` is the
     // primary shape of a classifier suite; without these two clauses it would be rejected here as
     // "no checks and no judge rubric".
@@ -1826,7 +1895,8 @@ function buildExpectation(
       `Invalid eval suite${ctx.suffix}: ${where} has no checks and no judge rubric — it must ` +
         'declare at least one of must_contain / must_not_contain / should_contain_any / must_call ' +
         '/ must_not_call / must_match / must_not_match / json_path / must_error / ' +
-        'tool_result_json_path / expect_label / expect_action / expect_rated / forced_by, or a ' +
+        'tool_result_json_path / tool_call_json_path / expect_label / expect_action / ' +
+        'expect_rated / forced_by, or a ' +
         'judge rubric.'
     );
   }
@@ -1843,6 +1913,7 @@ function buildExpectation(
     jsonPath,
     mustError,
     toolResultJsonPath,
+    toolCallJsonPath,
     expectLabel,
     expectAction,
     expectRated,

@@ -11,7 +11,7 @@
  * Nothing here may throw into a run — a missing/odd field just means that datum is skipped.
  */
 import { mcpToolErrorPayload } from '#src/core/mcpErrorPayload.js';
-import type { GthRunStats, GthToolResult } from '#src/core/types.js';
+import type { GthRunStats, GthToolCall, GthToolResult } from '#src/core/types.js';
 
 /**
  * BATCH-21 / BATCH-49 — the DEFAULT cap on a captured tool-result payload, in **UTF-8 bytes**.
@@ -107,11 +107,123 @@ export interface RunStatsAccumulator {
   tools: Set<string>;
   /** BATCH-21 — one record per executed tool result (`ToolMessage`), in arrival order, un-deduped. */
   toolResults: GthToolResult[];
+  /** BATCH-52 — one record per requested tool call whose arguments are complete, in request order. */
+  toolCalls: GthToolCall[];
+  /**
+   * BATCH-52 — the current round's streamed calls, keyed by `tool_call_chunks` index, whose
+   * arguments may still be arriving. Moved into {@link toolCalls} when the round's first
+   * `ToolMessage` lands (indexes restart each round), and read as-is by a mid-round finalize.
+   */
+  streamingCalls: Map<number, StreamingToolCall>;
+  /** BATCH-52 — ids already in {@link toolCalls}, so a call seen both streamed and whole is kept once. */
+  recordedCallIds: Set<string>;
+}
+
+/** BATCH-52 — one streamed tool call being reassembled from its `tool_call_chunks` deltas. */
+export interface StreamingToolCall {
+  id?: string;
+  name: string;
+  argsText: string;
 }
 
 /** A fresh, empty accumulator. */
 export function createRunStatsAccumulator(): RunStatsAccumulator {
-  return { input: 0, output: 0, sawUsage: false, tools: new Set<string>(), toolResults: [] };
+  return {
+    input: 0,
+    output: 0,
+    sawUsage: false,
+    tools: new Set<string>(),
+    toolResults: [],
+    toolCalls: [],
+    streamingCalls: new Map(),
+    recordedCallIds: new Set(),
+  };
+}
+
+/**
+ * BATCH-52 — the stored record for one requested call: its arguments capped like a result's
+ * payload. A call without a name is not recorded, matching the name set; a duplicate id is kept
+ * once. Returns `undefined` for either.
+ */
+function toolCallRecord(
+  call: StreamingToolCall,
+  recordedIds: ReadonlySet<string>,
+  maxBytes: number
+): GthToolCall | undefined {
+  if (!call.name) return undefined;
+  if (call.id && recordedIds.has(call.id)) return undefined;
+  const capped = capToolResultText(call.argsText, maxBytes);
+  return {
+    name: call.name,
+    ...(call.id ? { id: call.id } : {}),
+    args: capped.text,
+    ...(capped.truncated ? { argsTruncated: true, argsOriginalBytes: capped.originalBytes } : {}),
+  };
+}
+
+/** BATCH-52 — add one call to the accumulator's records (no-op for a nameless or repeated call). */
+function recordToolCall(acc: RunStatsAccumulator, call: StreamingToolCall, maxBytes: number): void {
+  const record = toolCallRecord(call, acc.recordedCallIds, maxBytes);
+  if (!record) return;
+  acc.toolCalls.push(record);
+  if (record.id) acc.recordedCallIds.add(record.id);
+}
+
+/**
+ * BATCH-52 — fold one message's requested tool calls into the argument records.
+ *
+ * A streamed chunk carries `tool_call_chunks`: argument fragments keyed by `index`, the id and
+ * name on the first fragment only. Those are concatenated per index, the same way the plain tool
+ * indication reassembles them, and a different id arriving at an index already holding a call
+ * starts a new call (a provider that sends no `index` puts every call at 0). A whole message — the
+ * non-streaming path, a replayed message, or a provider that sends complete calls on a chunk —
+ * carries `tool_calls` with parsed arguments, recorded at once.
+ */
+function accumulateToolCallArgs(
+  acc: RunStatsAccumulator,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  m: any,
+  maxBytes: number
+): void {
+  const deltas = m.tool_call_chunks;
+  if (Array.isArray(deltas) && deltas.length > 0) {
+    for (const delta of deltas) {
+      const index = typeof delta?.index === 'number' ? delta.index : 0;
+      let entry = acc.streamingCalls.get(index);
+      if (entry && delta.id && entry.id && entry.id !== delta.id) {
+        recordToolCall(acc, entry, maxBytes);
+        entry = undefined;
+      }
+      entry ??= { name: '', argsText: '' };
+      if (typeof delta.id === 'string' && delta.id) entry.id = delta.id;
+      if (typeof delta.name === 'string' && delta.name) entry.name = entry.name || delta.name;
+      if (typeof delta.args === 'string') entry.argsText += delta.args;
+      acc.streamingCalls.set(index, entry);
+    }
+    return;
+  }
+  const calls = m.tool_calls;
+  if (!Array.isArray(calls)) return;
+  for (const tc of calls) {
+    const name = typeof tc?.name === 'string' ? tc.name : '';
+    let argsText: string;
+    try {
+      argsText = JSON.stringify(tc.args ?? {});
+    } catch {
+      argsText = '';
+    }
+    recordToolCall(
+      acc,
+      { id: typeof tc?.id === 'string' ? tc.id : undefined, name, argsText },
+      maxBytes
+    );
+  }
+}
+
+/** BATCH-52 — the round is over: its streamed calls' arguments are complete, so record them. */
+function closeStreamingRound(acc: RunStatsAccumulator, maxBytes: number): void {
+  for (const call of acc.streamingCalls.values()) recordToolCall(acc, call, maxBytes);
+  acc.streamingCalls.clear();
 }
 
 /**
@@ -207,9 +319,12 @@ export function accumulateMessage(
         if (typeof name === 'string' && name.length > 0) acc.tools.add(name);
       }
     }
+    // BATCH-52 — the same calls with their arguments, for `tool_call_json_path`.
+    accumulateToolCallArgs(acc, m, captureMaxBytes);
 
     // Executed tool result (ToolMessage). Its `.name` is the tool that produced the result.
     const type: unknown = typeof m.getType === 'function' ? m.getType() : m._getType?.();
+    if (type === 'tool') closeStreamingRound(acc, captureMaxBytes);
     if (type === 'tool' && typeof m.name === 'string' && m.name.length > 0) {
       acc.tools.add(m.name);
       // BATCH-21 — capture the RESULT record too (same capture site, same fail-soft discipline):
@@ -251,13 +366,31 @@ export function accumulateMessage(
   }
 }
 
-/** Freeze the accumulator into the public {@link GthRunStats}. Tokens omitted unless observed. */
-export function finalizeRunStats(acc: RunStatsAccumulator): GthRunStats {
+/**
+ * Freeze the accumulator into the public {@link GthRunStats}. Tokens omitted unless observed.
+ *
+ * BATCH-52 — calls still streaming (no result has closed their round yet: the run ended on them,
+ * or stats are read mid-round) are included as they stand, without being moved, so a later fold
+ * still closes the round normally. `captureMaxBytes` caps those the same way a fold would.
+ */
+export function finalizeRunStats(
+  acc: RunStatsAccumulator,
+  captureMaxBytes: number = TOOL_RESULT_CONTENT_CAP
+): GthRunStats {
+  const toolCalls = [...acc.toolCalls];
+  const seen = new Set(acc.recordedCallIds);
+  for (const call of acc.streamingCalls.values()) {
+    const record = toolCallRecord(call, seen, captureMaxBytes);
+    if (!record) continue;
+    toolCalls.push(record);
+    if (record.id) seen.add(record.id);
+  }
   return {
     tokensInput: acc.sawUsage ? acc.input : undefined,
     tokensOutput: acc.sawUsage ? acc.output : undefined,
     tools: [...acc.tools],
     toolResults: [...acc.toolResults],
+    toolCalls,
   };
 }
 
@@ -278,5 +411,5 @@ export function extractRunStats(
   } catch {
     /* fail-soft */
   }
-  return finalizeRunStats(acc);
+  return finalizeRunStats(acc, captureMaxBytes);
 }

@@ -22,6 +22,7 @@ function makeExpectation(overrides: Partial<EvalExpectation> = {}): EvalExpectat
     jsonPath: [],
     mustError: [],
     toolResultJsonPath: [],
+    toolCallJsonPath: [],
     judgeRubric: undefined,
     ...overrides,
   };

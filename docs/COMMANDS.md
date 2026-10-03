@@ -560,6 +560,7 @@ These grade the agent's answer (and its tool trace). Use them at case level, ins
 | `json_path` | list | The answer parses as JSON and every entry holds. Each entry is `{ path, equals }` or `{ path, contains }` (exactly one), where `path` is a minimal dotted/indexed path (`$.items[0].scope`, `data.status`). |
 | `must_error` | string[] | For **each** pattern, at least one called tool matching it **returned an error** (the tool result's real error status, not text sniffing). Globs supported, same matcher as `must_call`. |
 | `tool_result_json_path` | list | Each entry is `{ tool, path }` plus optionally `equals` **or** `contains`. At least one result from a tool matching `tool` (glob) parses as JSON and `path` resolves in it (and matches `equals`/`contains` when set; neither = existence check). A non-JSON payload fails the entry. For a failed MCP call the payload graded is the server's own error body — see [Tool-result assertions](#tool-result-assertions). |
+| `tool_call_json_path` | list | Same entry shape as `tool_result_json_path`, read against the **arguments** a matching tool was called with: at least one call to a tool matching `tool` (glob) has arguments where `path` resolves (and matches `equals`/`contains` when set). Needs [`evalToolCallArgs`](configuration/output.md#recorded-tool-call-arguments-evaltoolcallargs) — see [Tool-call argument assertions](#tool-call-argument-assertions). |
 | `expect_label` | string | The classification the SUT produced equals this. The value must be one the suite's `classification.labels` declares. Requires a `classification` block. |
 | `expect_action` | string | The **action** the SUT produced equals this. Requires `classification.actions` **and** `classification.action_from`. |
 | `expect_rated` | `true` | A model actually rendered a verdict for this round — `model.label` is present. Asserts nothing about *which* verdict. `rater` target only, and not on a `model_free` case; see [Asserting that the rater answered](#asserting-that-the-rater-answered). |
@@ -592,6 +593,45 @@ The two result keys grade different things. `must_error` reads the result's erro
 A failed MCP call reaches the trace as the message the MCP adapter raises — `MCP tool 'report' on server 'contracts' returned an error:` followed by the server's own text — and the trace records that message unchanged, because it is what the model observed. `tool_result_json_path` grades the part after the prefix when the server's text is JSON, which is how the `code: forbidden` entry above passes. Two things are not gradable: a call whose tool name does not resolve to exactly one configured `mcpServers` key, and an error whose detail the server sent only in MCP `structuredContent` — `@langchain/mcp-adapters` discards structured content on the error path before gaunt-sloth sees the result, so only the text content ever arrives.
 
 Tool-result assertions read the in-process tool trace, so they require `target.type: gth-agent`; a suite using them with an `ag-ui` or `adk-agent` target is rejected before anything runs (exit `2`). Result payloads are recorded up to [`toolResultCaptureMaxBytes`](configuration/output.md#recorded-tool-result-size-toolresultcapturemaxbytes) (8192 UTF-8 bytes unless you set it). A longer payload is cut on a character boundary, and `tool_result_json_path` then fails it with a reason that names `toolResultCaptureMaxBytes` and the size the tool actually returned — a different reason from the one a payload that was never JSON gets, so a cut and a prose answer do not read as the same failure. An MCP error body over that size is not recovered at all rather than recovered half-cut, and the threshold moves with the key.
+
+#### Tool-call argument assertions
+
+Sometimes the fact that a tool was called is not enough. Say a case asks for open laptop orders: the agent called the search tool, but did it filter to open orders, or fetch everything and filter in its answer? `tool_call_json_path` checks the arguments the model sent.
+
+Turn on argument recording in the config the run is started with — the `-i` profile, the `-c` file or the project config — with [`evalToolCallArgs`](configuration/output.md#recorded-tool-call-arguments-evaltoolcallargs):
+
+```json
+{ "evalToolCallArgs": true }
+```
+
+Then assert on the arguments:
+
+```yaml
+- id: searches-open-orders
+  prompt: "Which laptop orders are still open?"
+  must_call: ["mcp__shop__search_orders"]
+  tool_call_json_path:
+    - { tool: "mcp__shop__search_orders", path: "filters.status", equals: "open" }
+    - { tool: "mcp__shop__search_orders", path: "query", contains: "laptop" }
+```
+
+```bash
+gth -i shop-eval eval evals/orders.yaml
+```
+
+Each entry passes when **at least one** call to a matching tool satisfies it, so a tool the agent called three times passes if any of the three calls sent the value. A failing entry quotes what it found: `tool_call_json_path "filters.status" (tool "mcp__shop__search_orders"): is "any", expected "open"`.
+
+With the setting on, every case result in `<case>.json` (and each turn of a multi-turn case) gains a `toolCalls` list — one entry per call, in the order the model made them, with the arguments as the JSON text the model sent:
+
+```json
+"toolCalls": [
+  { "name": "mcp__shop__search_orders", "id": "call_1", "args": "{\"query\":\"laptop\",\"filters\":{\"status\":\"open\"}}" }
+]
+```
+
+A suite that uses `tool_call_json_path` in a run without `evalToolCallArgs` is refused before anything runs (exit `2`), with an error naming the key. Arguments the model sent as invalid JSON fail the entry with `arguments are not JSON`, and arguments longer than [`toolResultCaptureMaxBytes`](configuration/output.md#recorded-tool-result-size-toolresultcapturemaxbytes) fail with a reason naming that key, the same way a cut tool result does.
+
+`tool_call_json_path` works with the `gth-agent` and `ag-ui` targets (the AG-UI stream carries each call's arguments). It is rejected before anything runs for `adk-agent`, whose A2A stream carries no tool calls, and for `rater`.
 
 ### Identity matrix
 
@@ -832,7 +872,7 @@ Rejected at parse time rather than passing silently: on any target but `rater` (
 
 For the run-level view, count the cells instead: a metric `where: ['model.label == none']` reports how many decisions were taken without a rating. Keep the model-free families out of its `over:` — they report no `model.label` because nobody was asked.
 
-Not supported for this target, and rejected before anything runs (exit `2`): the `identities` matrix (the classification seam is per-case, not per-identity, so every identity would be rated by the same model), any tool assertion (`must_call`/`must_not_call`/`must_error`/`tool_result_json_path` — no agent runs, so there is no trace, and a vacuous pass is worse than no assertion), a `profile`, and a suite with no `classification:` block.
+Not supported for this target, and rejected before anything runs (exit `2`): the `identities` matrix (the classification seam is per-case, not per-identity, so every identity would be rated by the same model), any tool assertion (`must_call`/`must_not_call`/`must_error`/`tool_result_json_path`/`tool_call_json_path` — no agent runs, so there is no trace, and a vacuous pass is worse than no assertion), a `profile`, and a suite with no `classification:` block.
 
 #### Negotiation cases
 
