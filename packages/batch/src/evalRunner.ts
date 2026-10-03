@@ -2,6 +2,7 @@ import { runBatchMatrix } from '#src/BatchRunner.js';
 import { runDeterministicChecks } from '#src/deterministicChecks.js';
 import { runToolCallChecks } from '#src/toolChecks.js';
 import { runToolResultChecks } from '#src/toolResultChecks.js';
+import { runToolArgsChecks } from '#src/toolArgsChecks.js';
 import type { CellResult, MatrixCell, RunCellFn, ToolResultRecord } from '#src/types.js';
 import type {
   ClassifyOutcome,
@@ -701,6 +702,9 @@ async function gradeApplicableBlocks(
     // third input kind, graded by its own checker (#src/toolResultChecks.js) and merged into the
     // same `reasons` so they drive the same PASS/FAIL/exit contract.
     const toolResultFailures = runToolResultChecks(toolResults, block);
+    // Tool-ARGUMENT assertions read the arguments recorded on those same results, graded by their
+    // own checker (#src/toolArgsChecks.js) into the same `reasons`.
+    const toolArgsFailures = runToolArgsChecks(toolResults, block);
     // BATCH-25 classification assertions read the cell's CLASSIFICATION (a fourth input kind,
     // beside the answer, the tool trace and the tool results), so they are graded by their own
     // checker and merged into the same `reasons` — the same PASS/FAIL/exit contract as every other
@@ -711,6 +715,7 @@ async function gradeApplicableBlocks(
       ...checks.failures,
       ...toolFailures,
       ...toolResultFailures,
+      ...toolArgsFailures,
       ...classificationFailures
     );
 

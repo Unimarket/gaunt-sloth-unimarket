@@ -22,6 +22,7 @@ function makeExpectation(overrides: Partial<EvalExpectation> = {}): EvalExpectat
     jsonPath: [],
     mustError: [],
     toolResultJsonPath: [],
+    toolArgs: [],
     judgeRubric: undefined,
     ...overrides,
   };
@@ -337,6 +338,98 @@ describe('runEvalSuite tool-call assertions', () => {
     expect(summary.cases[0].reasons).toEqual([
       'missing "hello"',
       'called forbidden tool "read_file" (matched "read_file")',
+    ]);
+  });
+});
+
+// Tool-ARGUMENT assertions graded through the runner, beside the name assertions that read the
+// same call, and merged into the same reasons and exit contract.
+describe('runEvalSuite tool-argument assertions', () => {
+  const searched = (query: string): CellRunOutcome => ({
+    ok: true,
+    answer: 'Found it.',
+    tools: ['mcp__crm__search'],
+    toolResults: [
+      {
+        name: 'mcp__crm__search',
+        isError: false,
+        content: '{"hits":1}',
+        args: JSON.stringify({ query }),
+      },
+    ],
+  });
+
+  it('PASSes when the call was made with the expected arguments', async () => {
+    const { runEvalSuite, classifyEvalExit } = await import('#src/evalRunner.js');
+    const suite = makeSuite([
+      makeCase({
+        mustCall: ['mcp__crm__*'],
+        toolArgs: [{ tool: 'mcp__crm__*', path: 'query', equals: 'acme' }],
+      }),
+    ]);
+
+    const summary = await runEvalSuite(suite, {
+      runCell: runCellReturning({ 'case-1': searched('acme') }),
+    });
+
+    expect(summary.cases[0]).toMatchObject({ verdict: 'PASS', reasons: [] });
+    expect(classifyEvalExit(summary)).toBe(0);
+  });
+
+  it('FAILs (exit 1) when must_call is met but the arguments are wrong', async () => {
+    const { runEvalSuite, classifyEvalExit } = await import('#src/evalRunner.js');
+    const suite = makeSuite([
+      makeCase({
+        mustCall: ['mcp__crm__*'],
+        toolArgs: [{ tool: 'mcp__crm__*', path: 'query', matches: /^acme$/ }],
+      }),
+    ]);
+
+    const summary = await runEvalSuite(suite, {
+      runCell: runCellReturning({ 'case-1': searched('globex') }),
+    });
+
+    expect(summary.cases[0].verdict).toBe('FAIL');
+    expect(summary.cases[0].reasons).toEqual([
+      'tool_args "query" (tool "mcp__crm__*"): mcp__crm__search: is "globex", which does not ' +
+        'match /^acme$/',
+    ]);
+    expect(classifyEvalExit(summary)).toBe(1);
+  });
+
+  it('FAILs when the cell recorded no tool results at all', async () => {
+    const { runEvalSuite } = await import('#src/evalRunner.js');
+    const suite = makeSuite([
+      makeCase({ toolArgs: [{ tool: 'mcp__crm__*', path: 'query', exists: true }] }),
+    ]);
+
+    const summary = await runEvalSuite(suite, {
+      runCell: runCellReturning({
+        'case-1': { ok: true, answer: 'done', tools: ['mcp__crm__search'] },
+      }),
+    });
+
+    expect(summary.cases[0].verdict).toBe('FAIL');
+    expect(summary.cases[0].reasons).toEqual([
+      'tool_args "query" (tool "mcp__crm__*"): no result from a matching tool',
+    ]);
+  });
+
+  it('carries the recorded arguments onto the case result unchanged', async () => {
+    const { runEvalSuite } = await import('#src/evalRunner.js');
+    const suite = makeSuite([makeCase({ mustCall: ['mcp__crm__*'] })]);
+
+    const summary = await runEvalSuite(suite, {
+      runCell: runCellReturning({ 'case-1': searched('acme') }),
+    });
+
+    expect(summary.cases[0].toolResults).toEqual([
+      {
+        name: 'mcp__crm__search',
+        isError: false,
+        content: '{"hits":1}',
+        args: '{"query":"acme"}',
+      },
     ]);
   });
 });

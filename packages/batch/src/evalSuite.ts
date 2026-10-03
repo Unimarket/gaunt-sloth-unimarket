@@ -20,6 +20,7 @@ import type {
   EvalTarget,
   EvalTurn,
   ForcedByMechanism,
+  ToolArgsCheck,
 } from '#src/evalTypes.js';
 // [[BATCH-31]] — the omittable note names, read off the registry rather than restated, so a suite
 // that names a note gets the same answer the arm will give it. Like the vocabulary import above
@@ -78,6 +79,8 @@ import type { ToolCoverageSpec } from '#src/toolCoverage.js';
  *     must_error: [ "mcp__unimarket__*" ]       # BATCH-21: a matching called tool RETURNED an error
  *     tool_result_json_path:                    # BATCH-21: over a matching tool RESULT's payload
  *       - { tool: "mcp__unimarket__*", path: "code", equals: "ACCESS_DENIED" }
+ *     tool_args:                                # over the ARGUMENTS of a matching tool call
+ *       - { tool: "mcp__crm__search", path: "query", matches: "^acme" }
  *     judge: "Answers with a ranked summary and correctly formatted values."
  *     pass_threshold: 7
  *   # Matrix case — per-identity expectations:
@@ -108,6 +111,19 @@ const RawToolResultJsonPathCheckSchema = z.object({
   contains: z.string().optional(),
 });
 
+/** One `tool_args` entry. Exactly one operator is enforced in code. A strict object, because a
+ * misspelt operator would otherwise be stripped in silence and leave an entry that asserts
+ * nothing. */
+const RawToolArgsCheckSchema = z.strictObject({
+  tool: z.string().min(1, 'tool_args entry must have a non-empty tool pattern'),
+  path: z.string().min(1, 'tool_args entry must have a non-empty path'),
+  equals: z.unknown().optional(),
+  contains: z.string().optional(),
+  matches: z.string().optional(),
+  exists: z.boolean().optional(),
+  absent: z.boolean().optional(),
+});
+
 /** The assertion bundle keys shared by a flat case and an `expect:` block. `expect:` blocks may also
  * carry `identities`; the flat case has no `identities` key (it always applies to every identity). */
 const RawAssertionsSchema = z.object({
@@ -122,6 +138,7 @@ const RawAssertionsSchema = z.object({
   // BATCH-21 tool-RESULT assertions (gth-agent target only, enforced after normalization below).
   must_error: z.array(z.string()).optional(),
   tool_result_json_path: z.array(RawToolResultJsonPathCheckSchema).optional(),
+  tool_args: z.array(RawToolArgsCheckSchema).optional(),
   // BATCH-25 CLASSIFICATION assertions. They sit in the assertion bundle — not on the case — so
   // they inherit identity scoping AND per-turn scoping for free; a multi-round negotiation case
   // needs a different expected action per round, which a case-level field could not express.
@@ -330,6 +347,7 @@ const FLAT_ASSERTION_KEYS = [
   'json_path',
   'must_error',
   'tool_result_json_path',
+  'tool_args',
   // BATCH-25 — the classification assertions MUST be listed here. This array drives BOTH the
   // flat-vs-`expect:` exclusivity check and the multi-turn "case-level assertions are rejected"
   // check; omitting them would let a suite declare both surfaces and have one silently ignored.
@@ -389,7 +407,10 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * - An invalid `must_match`/`must_not_match` regex, or a `json_path` entry not setting exactly one
  *   of `equals`/`contains`, or a `tool_result_json_path` entry setting BOTH (at most one; neither
  *   is a pure existence check).
- * - A tool-RESULT assertion (`must_error` / `tool_result_json_path`, BATCH-21) against an
+ * - A `tool_args` entry not setting exactly one of `equals`/`contains`/`matches`/`exists`/`absent`,
+ *   setting `exists`/`absent` to anything but `true`, carrying an unknown key, or with an invalid
+ *   `matches` regex.
+ * - A tool-RESULT assertion (`must_error` / `tool_result_json_path` / `tool_args`, BATCH-21) against an
  *   `adk-agent` OR `ag-ui` target — tool results exist only on the in-process `gth-agent` target
  *   (the AG-UI wire streams call names but no result payloads; A2A exposes no tool trace at all).
  * - A `"rater"` (BATCH-25 Half B) target missing its `rung`, naming one that is not on the approvals
@@ -907,10 +928,14 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
     for (const evalCase of cases) {
       for (const turn of evalCase.turns) {
         for (const expectation of turn.expectations) {
-          if (expectation.mustError.length > 0 || expectation.toolResultJsonPath.length > 0) {
+          if (
+            expectation.mustError.length > 0 ||
+            expectation.toolResultJsonPath.length > 0 ||
+            expectation.toolArgs.length > 0
+          ) {
             throw new Error(
               `Invalid eval suite${suffix}: case "${evalCase.id}" uses \`must_error\`/` +
-                '`tool_result_json_path` — tool-result assertions require target.type: gth-agent ' +
+                '`tool_result_json_path`/`tool_args` — tool-result assertions require target.type: gth-agent ' +
                 `(only the in-process agent surfaces tool results; ${
                   target.type === 'ag-ui'
                     ? 'the AG-UI wire streams tool-call names only, with no result payload'
@@ -936,11 +961,13 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
             expectation.mustCall.length > 0 ||
             expectation.mustNotCall.length > 0 ||
             expectation.mustError.length > 0 ||
-            expectation.toolResultJsonPath.length > 0
+            expectation.toolResultJsonPath.length > 0 ||
+            expectation.toolArgs.length > 0
           ) {
             throw new Error(
               `Invalid eval suite${suffix}: case "${evalCase.id}" uses a tool assertion ` +
-                '(`must_call` / `must_not_call` / `must_error` / `tool_result_json_path`), which a ' +
+                '(`must_call` / `must_not_call` / `must_error` / `tool_result_json_path` / ' +
+                '`tool_args`), which a ' +
                 '"rater" target cannot carry — it rates a command string and never runs an agent, ' +
                 'so there is no tool trace to grade (and a vacuous pass is worse than no ' +
                 'assertion). Grade the rating with `expect_label` / `expect_action`, or the ' +
@@ -1645,6 +1672,55 @@ function parseExpectRated(raw: boolean | undefined, ctx: ExpectationContext): bo
 }
 
 /**
+ * Validate one `tool_args` entry and normalize it to a {@link ToolArgsCheck} carrying exactly one
+ * operator key, so the grader can discriminate on key presence (`equals: null` is a valid
+ * operator). `exists`/`absent` accept only `true`: each `false` is the other operator, and two
+ * spellings for one assertion would make a suite harder to read than it needs to be. A `matches`
+ * pattern is compiled here, so an invalid one is a suite error rather than a run-time crash.
+ */
+function parseToolArgsCheck(
+  entry: z.infer<typeof RawToolArgsCheckSchema>,
+  where: string,
+  ctx: ExpectationContext
+): ToolArgsCheck {
+  const prefix = `Invalid eval suite${ctx.suffix}: ${where} tool_args entry for "${entry.path}"`;
+  const operators = (['equals', 'contains', 'matches', 'exists', 'absent'] as const).filter(
+    (key) => entry[key] !== undefined
+  );
+  if (operators.length !== 1) {
+    throw new Error(
+      `${prefix} must set exactly one of "equals", "contains", "matches", "exists" or "absent".`
+    );
+  }
+  const { tool, path } = entry;
+  switch (operators[0]) {
+    case 'equals':
+      return { tool, path, equals: entry.equals };
+    case 'contains':
+      return { tool, path, contains: entry.contains };
+    case 'matches':
+      try {
+        return { tool, path, matches: new RegExp(entry.matches!) };
+      } catch (error) {
+        throw new Error(
+          `${prefix} has an invalid matches pattern ${JSON.stringify(entry.matches)}: ` +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
+    case 'exists':
+      if (entry.exists !== true) {
+        throw new Error(`${prefix} sets "exists: false" — use "absent: true" instead.`);
+      }
+      return { tool, path, exists: true };
+    case 'absent':
+      if (entry.absent !== true) {
+        throw new Error(`${prefix} sets "absent: false" — use "exists: true" instead.`);
+      }
+      return { tool, path, absent: true };
+  }
+}
+
+/**
  * Normalize one raw assertion bundle (a flat case's case-level fields, or one `expect:` block) into
  * an {@link EvalExpectation}: default arrays to `[]`, compile regexes at parse time, validate
  * json_path shape, validate the optional `identities` scope against the suite's declared list, and
@@ -1750,6 +1826,7 @@ function buildExpectation(
     if (hasEquals) return { tool: entry.tool, path: entry.path, equals: entry.equals };
     return { tool: entry.tool, path: entry.path };
   });
+  const toolArgs = (raw.tool_args ?? []).map((entry) => parseToolArgsCheck(entry, where, ctx));
 
   // BATCH-25 classification assertions. Validated against the suite's declared enums HERE (not
   // later) so a typo'd label is a suite error rather than a case that can never pass.
@@ -1808,6 +1885,7 @@ function buildExpectation(
     jsonPath.length > 0 ||
     mustError.length > 0 ||
     toolResultJsonPath.length > 0 ||
+    toolArgs.length > 0 ||
     // BATCH-25 — a classification case whose ONLY assertion is `expect_label`/`expect_action` is the
     // primary shape of a classifier suite; without these two clauses it would be rejected here as
     // "no checks and no judge rubric".
@@ -1826,7 +1904,8 @@ function buildExpectation(
       `Invalid eval suite${ctx.suffix}: ${where} has no checks and no judge rubric — it must ` +
         'declare at least one of must_contain / must_not_contain / should_contain_any / must_call ' +
         '/ must_not_call / must_match / must_not_match / json_path / must_error / ' +
-        'tool_result_json_path / expect_label / expect_action / expect_rated / forced_by, or a ' +
+        'tool_result_json_path / tool_args / expect_label / expect_action / expect_rated / ' +
+        'forced_by, or a ' +
         'judge rubric.'
     );
   }
@@ -1843,6 +1922,7 @@ function buildExpectation(
     jsonPath,
     mustError,
     toolResultJsonPath,
+    toolArgs,
     expectLabel,
     expectAction,
     expectRated,
