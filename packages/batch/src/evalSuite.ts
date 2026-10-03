@@ -20,6 +20,7 @@ import type {
   EvalTarget,
   EvalTurn,
   ForcedByMechanism,
+  ToolCallJsonPathCheck,
 } from '#src/evalTypes.js';
 // [[BATCH-31]] — the omittable note names, read off the registry rather than restated, so a suite
 // that names a note gets the same answer the arm will give it. Like the vocabulary import above
@@ -111,12 +112,16 @@ const RawToolResultJsonPathCheckSchema = z.object({
 });
 
 /** BATCH-52 — one `tool_call_json_path` entry: the `tool_result_json_path` shape, read against a
- * matching call's arguments. Same at-most-one `equals`/`contains` rule, enforced in code. */
+ * matching call's arguments, plus `matches`, `present` and `all_calls`. At most one of
+ * `equals`/`contains`/`matches`, and `present: false` with none of them, enforced in code. */
 const RawToolCallJsonPathCheckSchema = z.object({
   tool: z.string().min(1, 'tool_call_json_path entry must have a non-empty tool pattern'),
   path: z.string().min(1, 'tool_call_json_path entry must have a non-empty path'),
   equals: z.unknown().optional(),
   contains: z.string().optional(),
+  matches: z.string().optional(),
+  present: z.boolean().optional(),
+  all_calls: z.boolean().optional(),
 });
 
 /** The assertion bundle keys shared by a flat case and an `expect:` block. `expect:` blocks may also
@@ -407,7 +412,8 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * - A tool-RESULT assertion (`must_error` / `tool_result_json_path`, BATCH-21) against an
  *   `adk-agent` OR `ag-ui` target — tool results exist only on the in-process `gth-agent` target
  *   (the AG-UI wire streams call names but no result payloads; A2A exposes no tool trace at all).
- * - A `tool_call_json_path` (BATCH-52) entry setting both `equals` and `contains`, or used against
+ * - A `tool_call_json_path` (BATCH-52) entry setting more than one of `equals`/`contains`/`matches`,
+ *   an invalid `matches` pattern, `present: false` together with any of the three, or used against
  *   an `adk-agent` target (A2A exposes no tool calls). The `evalToolCallArgs` opt-in is checked by
  *   the command ({@link suiteUsesToolCallArgs}), since it is run-level config, not suite content.
  * - A `"rater"` (BATCH-25 Half B) target missing its `rung`, naming one that is not on the approvals
@@ -1804,19 +1810,43 @@ function buildExpectation(
     return { tool: entry.tool, path: entry.path };
   });
 
-  // BATCH-52 tool-call ARGUMENT assertions — the same entry rules as tool_result_json_path.
-  const toolCallJsonPath = (raw.tool_call_json_path ?? []).map((entry) => {
-    const hasEquals = entry.equals !== undefined;
-    const hasContains = entry.contains !== undefined;
-    if (hasEquals && hasContains) {
+  // BATCH-52 tool-call ARGUMENT assertions — the tool_result_json_path entry rules, plus `matches`
+  // (compiled here, like must_match), `present` and `all_calls`. Each flag is kept on the entry
+  // only when it departs from its default.
+  const toolCallJsonPath = (raw.tool_call_json_path ?? []).map((entry): ToolCallJsonPathCheck => {
+    const entryLabel = `${where} tool_call_json_path entry for "${entry.path}"`;
+    const operators = [entry.equals, entry.contains, entry.matches].filter(
+      (operator) => operator !== undefined
+    );
+    if (operators.length > 1) {
       throw new Error(
-        `Invalid eval suite${ctx.suffix}: ${where} tool_call_json_path entry for ` +
-          `"${entry.path}" must set at most one of "equals" or "contains" (neither = existence check).`
+        `Invalid eval suite${ctx.suffix}: ${entryLabel} must set at most one of "equals", ` +
+          '"contains" or "matches" (none = existence check).'
       );
     }
-    if (hasContains) return { tool: entry.tool, path: entry.path, contains: entry.contains };
-    if (hasEquals) return { tool: entry.tool, path: entry.path, equals: entry.equals };
-    return { tool: entry.tool, path: entry.path };
+    if (entry.present === false && operators.length > 0) {
+      throw new Error(
+        `Invalid eval suite${ctx.suffix}: ${entryLabel} sets present: false, which cannot be ` +
+          'combined with "equals", "contains" or "matches".'
+      );
+    }
+    const check: ToolCallJsonPathCheck = { tool: entry.tool, path: entry.path };
+    if (entry.contains !== undefined) check.contains = entry.contains;
+    if (entry.equals !== undefined) check.equals = entry.equals;
+    if (entry.matches !== undefined) {
+      try {
+        check.matches = new RegExp(entry.matches);
+      } catch (error) {
+        throw new Error(
+          `Invalid eval suite${ctx.suffix}: ${entryLabel} has an invalid matches pattern ` +
+            `${JSON.stringify(entry.matches)}: ` +
+            (error instanceof Error ? error.message : String(error))
+        );
+      }
+    }
+    if (entry.present === false) check.present = false;
+    if (entry.all_calls === true) check.allCalls = true;
+    return check;
   });
 
   // BATCH-25 classification assertions. Validated against the suite's declared enums HERE (not

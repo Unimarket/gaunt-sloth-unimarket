@@ -1,6 +1,7 @@
 import { toolNameMatchesPattern } from '@gaunt-sloth/core/utils/toolMatching.js';
 
 import type { EvalExpectation, ToolCallJsonPathCheck } from '#src/evalTypes.js';
+import { resolveJsonPath } from '#src/deterministicChecks.js';
 import { gradeJsonPathValue } from '#src/toolResultChecks.js';
 import type { ToolCallRecord } from '#src/types.js';
 
@@ -56,10 +57,12 @@ export function runToolCallChecks(
  *
  * Each `tool_call_json_path` entry selects the calls whose name matches its `tool` pattern (the
  * `must_call` matcher), parses each call's arguments as JSON and applies `path` with `equals` /
- * `contains` / existence — the same evaluator `tool_result_json_path` uses on a result. The entry
- * passes iff **at least one** matching call satisfies it; otherwise ONE failure line names the
- * path, the pattern and the distinct per-call reasons. Arguments cut at the capture cap fail with
- * a reason naming `toolResultCaptureMaxBytes` rather than being graded as a prefix.
+ * `contains` / `matches` / existence — the same evaluator `tool_result_json_path` uses on a result.
+ * `present: false` inverts the existence check: the call satisfies the entry when the path does not
+ * resolve. The entry passes iff **at least one** matching call satisfies it, or with `allCalls`
+ * iff **every** matching call does; otherwise ONE failure line names the path, the pattern and the
+ * distinct per-call reasons. No matching call at all always fails. Arguments cut at the capture
+ * cap fail with a reason naming `toolResultCaptureMaxBytes` rather than being graded as a prefix.
  */
 export function runToolCallArgChecks(
   toolCalls: ToolCallRecord[],
@@ -85,10 +88,13 @@ function checkToolCallJsonPath(
   const reasons = new Set<string>();
   for (const call of matching) {
     const reason = evaluateCallAgainstCheck(call, check);
-    if (reason === undefined) return undefined;
-    reasons.add(reason);
+    if (reason === undefined) {
+      if (!check.allCalls) return undefined;
+    } else {
+      reasons.add(reason);
+    }
   }
-  return `${label}: ${[...reasons].join('; ')}`;
+  return reasons.size === 0 ? undefined : `${label}: ${[...reasons].join('; ')}`;
 }
 
 function evaluateCallAgainstCheck(
@@ -114,6 +120,10 @@ function evaluateCallAgainstCheck(
     root = JSON.parse(text);
   } catch {
     return 'arguments are not JSON';
+  }
+  if (check.present === false) {
+    const { found, value } = resolveJsonPath(root, check.path);
+    return found ? `path is present with ${JSON.stringify(value)}` : undefined;
   }
   return gradeJsonPathValue(root, check);
 }
