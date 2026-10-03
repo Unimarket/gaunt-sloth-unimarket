@@ -2038,6 +2038,25 @@ describe('GthLangChainAgent', () => {
         });
       });
 
+      it('records the promoted call for the run stats, so its result carries the arguments', async () => {
+        const agent = await initWithTool();
+        const repair = getRepairMw();
+
+        const textMsg = new AIMessage({ id: 'lc1', content: '[tool:get_weather]{"city":"Paris"}' });
+        const promoted = repair!.afterModel!({ messages: [textMsg] }).messages[0];
+        (agent as unknown as { recordRunStats(message: unknown): void }).recordRunStats(
+          new ToolMessage({
+            content: 'sunny',
+            tool_call_id: promoted.tool_calls[0].id,
+            name: 'get_weather',
+          })
+        );
+
+        expect(agent.getRunStats().toolResults).toEqual([
+          { name: 'get_weather', isError: false, content: 'sunny', args: '{"city":"Paris"}' },
+        ]);
+      });
+
       it('leaves a native-tool_calls message untouched (returns state unchanged — happy path)', async () => {
         await initWithTool();
         const repair = getRepairMw();

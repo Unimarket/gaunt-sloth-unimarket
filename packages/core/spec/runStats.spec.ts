@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import {
   accumulateMessage,
+  accumulatePromotedToolCalls,
   capToolResultText,
   createRunStatsAccumulator,
   extractRunStats,
@@ -767,6 +768,68 @@ describe('core/runStats', () => {
           new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
         ]);
         expect(stats.toolResults![0].args).toBe('{"query":"acme"}');
+      });
+    });
+
+    describe('promoted calls', () => {
+      const promoted = () =>
+        new AIMessage({
+          id: 'm1',
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'search', args: { query: 'acme' }, type: 'tool_call' }],
+          usage_metadata: { input_tokens: 5, output_tokens: 7, total_tokens: 12 },
+        });
+
+      it('records the arguments of a call the stream never delivered as a message', () => {
+        const acc = createRunStatsAccumulator();
+        accumulateMessage(acc, new AIMessageChunk({ id: 'm1', content: '[tool:search]{}' }));
+        accumulatePromotedToolCalls(acc, promoted());
+        accumulateMessage(
+          acc,
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' })
+        );
+        expect(finalizeRunStats(acc).toolResults).toEqual([
+          { name: 'search', isError: false, content: 'ok', args: '{"query":"acme"}' },
+        ]);
+      });
+
+      it('records the name of a promoted call that no result answers', () => {
+        const acc = createRunStatsAccumulator();
+        accumulatePromotedToolCalls(acc, promoted());
+        expect(finalizeRunStats(acc).tools).toEqual(['search']);
+      });
+
+      it('does not count the usage of the message it replaces a second time', () => {
+        const acc = createRunStatsAccumulator();
+        accumulatePromotedToolCalls(acc, promoted());
+        expect(finalizeRunStats(acc).tokensInput).toBeUndefined();
+      });
+
+      it('records the calls once when the finished message is folded as well', () => {
+        const acc = createRunStatsAccumulator();
+        accumulatePromotedToolCalls(acc, promoted());
+        accumulateMessage(acc, promoted());
+        accumulateMessage(
+          acc,
+          new ToolMessage({ content: 'r1', tool_call_id: 'c1', name: 'search' })
+        );
+        // A second result under the id has no call left to claim.
+        accumulateMessage(
+          acc,
+          new ToolMessage({ content: 'r2', tool_call_id: 'c1', name: 'search' })
+        );
+        expect(finalizeRunStats(acc).toolResults!.map((r) => [r.content, r.args])).toEqual([
+          ['r1', '{"query":"acme"}'],
+          ['r2', undefined],
+        ]);
+      });
+
+      it('is fail-soft on input that is not a message with tool calls', () => {
+        const acc = createRunStatsAccumulator();
+        expect(() => accumulatePromotedToolCalls(acc, null)).not.toThrow();
+        expect(() => accumulatePromotedToolCalls(acc, 42)).not.toThrow();
+        expect(() => accumulatePromotedToolCalls(acc, { tool_calls: 'nope' })).not.toThrow();
+        expect(finalizeRunStats(acc).tools).toEqual([]);
       });
     });
   });
