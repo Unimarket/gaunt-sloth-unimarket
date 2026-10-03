@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { ToolCallRecord } from '#src/types.js';
 
 describe('runToolCallChecks', () => {
   it('passes when every must_call pattern matched and no must_not_call pattern did', async () => {
@@ -71,6 +72,90 @@ describe('runToolCallChecks', () => {
     const { runToolCallChecks } = await import('#src/toolChecks.js');
     expect(runToolCallChecks([], { mustCall: ['mcp__*'], mustNotCall: [] })).toEqual([
       'did not call "mcp__*"',
+    ]);
+  });
+});
+
+describe('runToolCallArgChecks — tool_call_json_path (BATCH-52)', () => {
+  const search = (args: string, extra: Partial<ToolCallRecord> = {}): ToolCallRecord => ({
+    name: 'mcp__shop__search',
+    args,
+    ...extra,
+  });
+
+  it('passes on equals, contains and existence against a matching call’s arguments', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks(
+      [search('{"query":"laptop bags","filters":{"status":"open"}}')],
+      {
+        toolCallJsonPath: [
+          { tool: 'mcp__shop__search', path: 'filters.status', equals: 'open' },
+          { tool: 'mcp__shop__*', path: 'query', contains: 'laptop' },
+          { tool: 'mcp__shop__search', path: 'filters' },
+        ],
+      }
+    );
+    expect(failures).toEqual([]);
+  });
+
+  it('fails with the value it found when equals does not hold', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks([search('{"filters":{"status":"closed"}}')], {
+      toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'filters.status', equals: 'open' }],
+    });
+    expect(failures).toEqual([
+      'tool_call_json_path "filters.status" (tool "mcp__shop__search"): is "closed", expected "open"',
+    ]);
+  });
+
+  it('passes when ANY of several calls to the tool satisfies it', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks([search('{"page":1}'), search('{"page":2}')], {
+      toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'page', equals: 2 }],
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it('fails when no call matches the tool pattern', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks([{ name: 'read_file', args: '{"path":"a"}' }], {
+      toolCallJsonPath: [{ tool: 'mcp__shop__*', path: 'query' }],
+    });
+    expect(failures).toEqual([
+      'tool_call_json_path "query" (tool "mcp__shop__*"): no call to a matching tool',
+    ]);
+  });
+
+  it('fails deterministically on arguments that are not JSON', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks([search('{"query":')], {
+      toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'query' }],
+    });
+    expect(failures).toEqual([
+      'tool_call_json_path "query" (tool "mcp__shop__search"): arguments are not JSON',
+    ]);
+  });
+
+  it('grades a call with no arguments as an empty object', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks([search('')], {
+      toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'query' }],
+    });
+    expect(failures).toEqual([
+      'tool_call_json_path "query" (tool "mcp__shop__search"): path did not resolve',
+    ]);
+  });
+
+  it('names toolResultCaptureMaxBytes when the arguments were cut, even if the prefix parses', async () => {
+    const { runToolCallArgChecks } = await import('#src/toolChecks.js');
+    const failures = runToolCallArgChecks(
+      [search('{"query":"x"}', { argsTruncated: true, argsOriginalBytes: 9000 })],
+      { toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'query' }] }
+    );
+    expect(failures).toEqual([
+      'tool_call_json_path "query" (tool "mcp__shop__search"): arguments were truncated at ' +
+        'toolResultCaptureMaxBytes (the call sent 9000 bytes); raise toolResultCaptureMaxBytes ' +
+        'to capture them whole',
     ]);
   });
 });

@@ -684,7 +684,8 @@ export function evalCommand(
         // Specific `.js` subpaths (not the bare package root), matching batchCommand.ts's
         // convention — vitest's workspace-import resolver recognizes these and resolves straight to
         // source, so specs exercise live `packages/batch/src` rather than a `dist/` build.
-        const { parseEvalSuite } = await import('@gaunt-sloth/batch/evalSuite.js');
+        const { parseEvalSuite, suiteUsesToolCallArgs } =
+          await import('@gaunt-sloth/batch/evalSuite.js');
         const { runEvalSuite, classifyEvalExit } = await import('@gaunt-sloth/batch/evalRunner.js');
         const { writeEvalOutput } = await import('@gaunt-sloth/batch/evalOutput.js');
         const { concurrencyHint } = await import('@gaunt-sloth/batch/BatchRunner.js');
@@ -782,6 +783,8 @@ export function evalCommand(
             sourcePrefix: 'EVAL',
             wrapBlockPrefix: 'message',
             wrapPrefix: 'user message',
+            // BATCH-52 — run-level, like the reporters: one answer for every suite and identity.
+            recordToolCalls: runLevelConfig.evalToolCallArgs === true,
           } as const;
 
           // Build the SUT run function(s), selected by `target.type`, AND resolve the base config
@@ -854,8 +857,9 @@ export function evalCommand(
             baseConfig = await initConfigForCell(commandLineConfigOverrides, sweepCell);
             const { buildAgUiRunCell, buildAgUiRunConversation } =
               await import('#src/commands/agUiEvalRunner.js');
-            runCell = buildAgUiRunCell(parsedSuite.target);
-            runConversation = buildAgUiRunConversation(parsedSuite.target);
+            const agUiOptions = { recordToolCalls: runCellOptions.recordToolCalls };
+            runCell = buildAgUiRunCell(parsedSuite.target, undefined, agUiOptions);
+            runConversation = buildAgUiRunConversation(parsedSuite.target, undefined, agUiOptions);
           } else if (parsedSuite.target.type === 'rater') {
             // BATCH-25 Half B: grade gth's OWN approvals rater. Nothing is run through an agent —
             // each case is a command the rater rates — so this branch builds the `classify` seam
@@ -1032,6 +1036,18 @@ export function evalCommand(
             if (options.relabelDiff !== undefined) {
               await printRelabelDiff(parsedSuite, options.relabelDiff);
               continue;
+            }
+
+            // BATCH-52 — argument assertions need the arguments, which are recorded only when the
+            // run opts in. Refused before anything runs (→ this suite's harness error, exit 2):
+            // without the opt-in every such assertion would fail for a reason that is not the
+            // model's, and read as the model having sent the wrong arguments.
+            if (suiteUsesToolCallArgs(parsedSuite) && runLevelConfig.evalToolCallArgs !== true) {
+              throw new Error(
+                'the suite uses tool_call_json_path, which needs tool-call arguments ' +
+                  'recorded — set "evalToolCallArgs": true in the config the run is started with ' +
+                  '(the -i profile, the -c file or the project config). No cases were run.'
+              );
             }
 
             // BATCH-25 — the config sweep: the SAME corpus run once per cell, then ONE comparison

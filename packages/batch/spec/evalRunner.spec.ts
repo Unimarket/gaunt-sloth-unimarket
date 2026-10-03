@@ -22,6 +22,7 @@ function makeExpectation(overrides: Partial<EvalExpectation> = {}): EvalExpectat
     jsonPath: [],
     mustError: [],
     toolResultJsonPath: [],
+    toolCallJsonPath: [],
     judgeRubric: undefined,
     ...overrides,
   };
@@ -1086,5 +1087,104 @@ describe('runEvalSuite multi-turn', () => {
     const convo = summary.cases.find((c) => c.id === 'convo')!;
     expect(single.turns).toBeUndefined();
     expect(convo.turns).toHaveLength(2);
+  });
+});
+
+describe('runEvalSuite tool-call argument assertions (BATCH-52)', () => {
+  const searchCase = () =>
+    makeCase({
+      mustCall: ['mcp__shop__search'],
+      toolCallJsonPath: [{ tool: 'mcp__shop__search', path: 'filters.status', equals: 'open' }],
+    });
+
+  it('PASSes when the tool was called with the expected argument, and writes the calls', async () => {
+    const { runEvalSuite, classifyEvalExit } = await import('#src/evalRunner.js');
+    const toolCalls = [
+      { name: 'mcp__shop__search', id: 'c1', args: '{"filters":{"status":"open"}}' },
+    ];
+    const runCell = runCellReturning({
+      'case-1': { ok: true, answer: 'Two open orders.', tools: ['mcp__shop__search'], toolCalls },
+    });
+
+    const summary = await runEvalSuite(makeSuite([searchCase()]), { runCell });
+
+    expect(summary.cases[0]).toMatchObject({ verdict: 'PASS', reasons: [] });
+    expect(summary.cases[0].toolCalls).toEqual(toolCalls);
+    expect(classifyEvalExit(summary)).toBe(0);
+  });
+
+  it('FAILs (exit 1) when the tool was called with a different argument', async () => {
+    const { runEvalSuite, classifyEvalExit } = await import('#src/evalRunner.js');
+    const runCell = runCellReturning({
+      'case-1': {
+        ok: true,
+        answer: 'All orders.',
+        tools: ['mcp__shop__search'],
+        toolCalls: [{ name: 'mcp__shop__search', args: '{"filters":{"status":"any"}}' }],
+      },
+    });
+
+    const summary = await runEvalSuite(makeSuite([searchCase()]), { runCell });
+
+    expect(summary.cases[0].reasons).toEqual([
+      'tool_call_json_path "filters.status" (tool "mcp__shop__search"): is "any", expected "open"',
+    ]);
+    expect(classifyEvalExit(summary)).toBe(1);
+  });
+
+  it('leaves `toolCalls` off the case result when the runner recorded none', async () => {
+    const { runEvalSuite } = await import('#src/evalRunner.js');
+    const runCell = runCellReturning({ 'case-1': { ok: true, answer: 'hello there' } });
+
+    const summary = await runEvalSuite(makeSuite([makeCase({ mustContain: ['hello'] })]), {
+      runCell,
+    });
+
+    expect(JSON.parse(JSON.stringify(summary.cases[0]))).not.toHaveProperty('toolCalls');
+  });
+
+  it('grades each turn of a multi-turn case against that turn’s own calls', async () => {
+    const { runEvalSuite } = await import('#src/evalRunner.js');
+    const evalCase: EvalCase = {
+      id: 'conv-1',
+      passThreshold: 6,
+      turns: [
+        {
+          user: 'show page 1',
+          expectations: [
+            makeExpectation({ toolCallJsonPath: [{ tool: 'search', path: 'page', equals: 1 }] }),
+          ],
+        },
+        {
+          user: 'next page',
+          expectations: [
+            makeExpectation({ toolCallJsonPath: [{ tool: 'search', path: 'page', equals: 2 }] }),
+          ],
+        },
+      ],
+    };
+    const runConversation: RunConversationFn = async () => [
+      {
+        ok: true,
+        answer: 'p1',
+        tools: ['search'],
+        toolCalls: [{ name: 'search', args: '{"page":1}' }],
+      },
+      {
+        ok: true,
+        answer: 'p1 again',
+        tools: ['search'],
+        toolCalls: [{ name: 'search', args: '{"page":1}' }],
+      },
+    ];
+
+    const summary = await runEvalSuite(makeSuite([evalCase]), { runConversation });
+
+    expect(summary.cases[0].verdict).toBe('FAIL');
+    expect(summary.cases[0].turns![0].verdict).toBe('PASS');
+    expect(summary.cases[0].turns![1].toolCalls).toEqual([{ name: 'search', args: '{"page":1}' }]);
+    expect(summary.cases[0].reasons).toEqual([
+      'turn 2: tool_call_json_path "page" (tool "search"): is 1, expected 2',
+    ]);
   });
 });

@@ -98,6 +98,12 @@ export interface ProductionRunCellOptions {
   /** `wrapContent` human-readable prefix paired with {@link wrapBlockPrefix} (e.g.
    * `'prompt-executable script'` / `'user message'`). */
   wrapPrefix: string;
+  /**
+   * BATCH-52 — pass each run's requested tool calls, with their arguments, through to the outcome.
+   * `gth eval` sets it from the run-level `evalToolCallArgs`; `gth batch` never does. Off, the
+   * outcome carries no `toolCalls` and the written JSON is unchanged.
+   */
+  recordToolCalls?: boolean;
 }
 
 /**
@@ -145,22 +151,39 @@ export async function buildProductionRunCell(
     // an orphaned-process leak, one per cell.
     const resolvers = createResolvers();
     try {
-      const { ok, answer, tokensInput, tokensOutput, tools, toolResults, advertisedTools } =
-        await runSingleShot(
-          `${options.sourcePrefix}-${cell.id}`,
-          preamble,
-          content,
-          cellConfig,
-          resolvers,
-          options.command,
-          // batch/eval ask for the lean backend, same as exec/ask — the only one shipped;
-          // config.agent.backend names no other.
-          resolveAgentFactory(cellConfig, 'lean'),
-          { displayCommand: options.displayCommand, origin: options.origin }
-        );
+      const {
+        ok,
+        answer,
+        tokensInput,
+        tokensOutput,
+        tools,
+        toolResults,
+        toolCalls,
+        advertisedTools,
+      } = await runSingleShot(
+        `${options.sourcePrefix}-${cell.id}`,
+        preamble,
+        content,
+        cellConfig,
+        resolvers,
+        options.command,
+        // batch/eval ask for the lean backend, same as exec/ask — the only one shipped;
+        // config.agent.backend names no other.
+        resolveAgentFactory(cellConfig, 'lean'),
+        { displayCommand: options.displayCommand, origin: options.origin }
+      );
       // BATCH-32: `advertisedTools` is threaded through with the rest — it is `gth eval`'s coverage
       // denominator, and this adapter is the only place the agent's inventory can reach the runner.
-      return { ok, answer, tokensInput, tokensOutput, tools, toolResults, advertisedTools };
+      return {
+        ok,
+        answer,
+        tokensInput,
+        tokensOutput,
+        tools,
+        toolResults,
+        ...(options.recordToolCalls && toolCalls ? { toolCalls } : {}),
+        advertisedTools,
+      };
     } catch (error) {
       // runSingleShot itself is documented to never throw for a normal LLM/tool failure (it
       // returns false instead); this guards the rare case of a genuinely unexpected exception so
@@ -243,6 +266,7 @@ export async function buildProductionRunConversation(
           tokensOutput,
           tools,
           toolResults,
+          toolCalls,
           advertisedTools,
           error,
         }) => ({
@@ -252,6 +276,7 @@ export async function buildProductionRunConversation(
           tokensOutput,
           tools,
           toolResults,
+          ...(options.recordToolCalls && toolCalls ? { toolCalls } : {}),
           advertisedTools,
           error,
         })

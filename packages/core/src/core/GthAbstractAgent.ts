@@ -606,7 +606,10 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
 
   /** GS2-16 — the analytics harvested since the last {@link resetRunStats}. Never throws. */
   getRunStats(): GthRunStats {
-    return finalizeRunStats(this.runStatsAcc);
+    return finalizeRunStats(
+      this.runStatsAcc,
+      resolveToolResultCaptureMaxBytes(this.config ?? undefined)
+    );
   }
 
   /**

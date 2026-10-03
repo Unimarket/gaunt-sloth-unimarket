@@ -234,4 +234,31 @@ describe('loadConfiguredEvalToolCoverage (BATCH-48)', () => {
       await expect(loadRunLevelEvalConfig({})).rejects.toThrow('Invalid reporters');
     });
   });
+
+  // BATCH-52 — the `evalToolCallArgs` opt-in is run-level too: one answer per run, from the config
+  // the run was started with, never from an identity's profile.
+  describe('loadRunLevelEvalConfig reads evalToolCallArgs (BATCH-52)', () => {
+    it('reads the opt-in from the -i profile, and only when that profile is named', async () => {
+      writeProjectConfig({ llm: LLM_SPEC });
+      writeProfileConfig('mcp-eval-root', { llm: LLM_SPEC, evalToolCallArgs: true });
+
+      const { loadRunLevelEvalConfig } = await import('#src/config/loader.js');
+      expect(
+        (await loadRunLevelEvalConfig({ identityProfile: 'mcp-eval-root' })).evalToolCallArgs
+      ).toBe(true);
+
+      const { setProjectDir } = await import('#src/utils/systemUtils.js');
+      setProjectDir(undefined);
+      expect(await loadRunLevelEvalConfig({})).toEqual({ found: true, layer: 'project' });
+    });
+
+    it('throws on a value that is not a boolean, naming the key', async () => {
+      writeProjectConfig({ llm: LLM_SPEC, evalToolCallArgs: 'yes' });
+
+      const { loadRunLevelEvalConfig } = await import('#src/config/loader.js');
+      await expect(loadRunLevelEvalConfig({})).rejects.toThrow(
+        /Invalid evalToolCallArgs[\s\S]*evalToolCallArgs must be true or false/
+      );
+    });
+  });
 });

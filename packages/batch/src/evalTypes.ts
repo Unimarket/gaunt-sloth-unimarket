@@ -11,7 +11,7 @@ import type { ApprovalRung } from '@gaunt-sloth/core/config/shell-policy.js';
 // no imports of its own, so even a value import from it would be cheap — but the totality check
 // below needs only the type, and a type import erases entirely.
 import type { PreflightFloorKind } from '@gaunt-sloth/core/core/shell/raterVocabulary.js';
-import type { ToolResultRecord } from '#src/types.js';
+import type { ToolCallRecord, ToolResultRecord } from '#src/types.js';
 // TYPE-ONLY for the same reason the import above is: this module is on the suite-parse path, and
 // `raterPromptArm.js` pulls core's note builders in as values.
 import type { RaterPromptArm } from '#src/raterPromptArm.js';
@@ -341,6 +341,14 @@ export interface ToolResultJsonPathCheck {
 }
 
 /**
+ * One `tool_call_json_path` assertion (BATCH-52): the {@link ToolResultJsonPathCheck} shape, read
+ * against the ARGUMENTS a matching tool was called with instead of what it returned. Passes when
+ * at least one matching call satisfies it. Requires `evalToolCallArgs` in the run-level config and
+ * a `gth-agent` or `ag-ui` target.
+ */
+export type ToolCallJsonPathCheck = ToolResultJsonPathCheck;
+
+/**
  * One expectation block (BATCH-12) — the BATCH-10 assertion bundle PLUS an optional `identities`
  * scope. This is the atom the whole eval layer normalizes to: a flat case is sugar for ONE
  * unscoped expectation (applies to every identity), and a matrix case's `expect:` array is a list
@@ -376,6 +384,9 @@ export interface EvalExpectation {
   /** BATCH-21 minimal JSON-path assertions over a matching tool result's payload — see
    * {@link ToolResultJsonPathCheck}. `gth-agent` target only (parse-rejected otherwise). */
   toolResultJsonPath: ToolResultJsonPathCheck[];
+  /** BATCH-52 minimal JSON-path assertions over a matching tool call's ARGUMENTS — see
+   * {@link ToolCallJsonPathCheck}. Opt-in (`evalToolCallArgs`); `gth-agent` / `ag-ui` targets only. */
+  toolCallJsonPath: ToolCallJsonPathCheck[];
   /** The judge rubric, when present and non-blank. `undefined` = no judge for this block. */
   judgeRubric?: string;
   /**
@@ -502,6 +513,8 @@ export interface TurnRunOutcome {
   /** BATCH-21 — this turn's per-tool-call result records (parallel to {@link tools}; a per-turn
    * delta like everything else here). Only the in-process `gth-agent` runner populates it. */
   toolResults?: ToolResultRecord[];
+  /** BATCH-52 — this turn's requested tool calls with their arguments (opt-in; a per-turn delta). */
+  toolCalls?: ToolCallRecord[];
   /**
    * BATCH-32 — the advertised-tool inventory (the coverage denominator). **The one field here that
    * is NOT a per-turn delta**: a conversation builds its agent once, so the inventory is fixed for
@@ -870,6 +883,8 @@ export interface EvalTurnResult {
   tools?: string[];
   /** BATCH-21 — this turn's per-tool-call result records (mirrors {@link TurnRunOutcome.toolResults}). */
   toolResults?: ToolResultRecord[];
+  /** BATCH-52 — this turn's requested tool calls (mirrors {@link TurnRunOutcome.toolCalls}). */
+  toolCalls?: ToolCallRecord[];
   /** Whether this turn's SUT invocation ran (mirrors {@link TurnRunOutcome.ok}); `false` = the turn
    * produced no answer (transport/agent error, or the conversation aborted before reaching it). */
   ok: boolean;
@@ -906,6 +921,9 @@ export interface EvalCaseResult {
    * the runner produced none, so a pre-BATCH-21 `<id>.json` stays byte-for-byte identical). For a
    * multi-turn cell this stays unset like `tools` — read {@link turns} instead. */
   toolResults?: ToolResultRecord[];
+  /** BATCH-52 — the cell's requested tool calls with their arguments. Omitted unless the run opted
+   * in with `evalToolCallArgs`; unset on a multi-turn cell like `tools` — read {@link turns}. */
+  toolCalls?: ToolCallRecord[];
   durationMs: number;
   checks?: DeterministicCheckResult;
   judge?: JudgeOutcome;

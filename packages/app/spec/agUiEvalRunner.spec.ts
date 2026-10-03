@@ -127,7 +127,12 @@ describe('agUiEvalRunner', () => {
         messages: [{ id: 'u1', role: 'user', content: 'weather?' }],
       });
 
-      expect(result).toEqual({ answer: 'The weather is sunny.', tools: ['get_weather'] });
+      expect(result).toEqual({
+        answer: 'The weather is sunny.',
+        tools: ['get_weather'],
+        // BATCH-52 — a started call with no TOOL_CALL_ARGS has empty arguments.
+        toolCalls: [{ name: 'get_weather', id: 'tc-get_weather', args: '' }],
+      });
       // Drove the AG-UI protocol endpoint...
       expect(calls[0].url).toBe('http://localhost:3000/agents/gth/run');
       expect(calls[0].init.method).toBe('POST');
@@ -365,7 +370,11 @@ describe('agUiEvalRunner', () => {
         runId: 'r',
         messages: [{ id: 'u1', role: 'user', content: 'x' }],
       });
-      expect(result).toEqual({ answer: 'lf ok', tools: ['get_weather'] });
+      expect(result).toEqual({
+        answer: 'lf ok',
+        tools: ['get_weather'],
+        toolCalls: [{ name: 'get_weather', id: 'tc-get_weather', args: '' }],
+      });
     });
   });
 
@@ -575,6 +584,87 @@ cases:
       expect(summary.cases[0].turns![1].ok).toBe(false);
       expect(summary.cases[0].reasons.some((r) => r.startsWith('turn 2:'))).toBe(true);
       expect(summary.cases[0].reasons.join(' ')).toContain('stream reset by peer');
+    });
+  });
+
+  // BATCH-52 — each call's arguments are reassembled from its TOOL_CALL_ARGS deltas and passed to
+  // the outcome only when the run opts in (`evalToolCallArgs`).
+  describe('tool-call arguments (BATCH-52)', () => {
+    const toolArgs = (name: string, delta: string) => ({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: `tc-${name}`,
+      delta,
+    });
+    const searchStream = () =>
+      okStream([
+        runStarted,
+        toolStart('search'),
+        toolArgs('search', '{"filters":'),
+        toolArgs('search', '{"status":"open"}}'),
+        { type: EventType.TOOL_CALL_END, toolCallId: 'tc-search' },
+        textStart,
+        textContent('Two open orders.'),
+        textEnd,
+        runFinished,
+      ]);
+    const ARGS_SUITE = `
+target: { type: ag-ui, url: "http://localhost:3000", agent_id: gth }
+cases:
+  - id: searched-open
+    prompt: "find open orders"
+    tool_call_json_path:
+      - { tool: search, path: filters.status, equals: open }
+`;
+
+    it('reassembles a call’s arguments from its TOOL_CALL_ARGS deltas', async () => {
+      const { fetchImpl } = fakeFetch(searchStream);
+      const result = await createAgUiClient(TARGET, fetchImpl).run({
+        threadId: 't',
+        runId: 'r',
+        messages: [{ id: 'u1', role: 'user', content: 'x' }],
+      });
+      expect(result.toolCalls).toEqual([
+        { name: 'search', id: 'tc-search', args: '{"filters":{"status":"open"}}' },
+      ]);
+    });
+
+    it('grades tool_call_json_path through the real decoder when the run opts in', async () => {
+      const { fetchImpl } = fakeFetch(searchStream);
+      const runCell = buildAgUiRunCell(TARGET, (target) => createAgUiClient(target, fetchImpl), {
+        recordToolCalls: true,
+      });
+
+      const summary = await runEvalSuite(parseEvalSuite(ARGS_SUITE), { runCell });
+
+      expect(summary.cases[0]).toMatchObject({ verdict: 'PASS', reasons: [] });
+      expect(summary.cases[0].toolCalls).toEqual([
+        { name: 'search', id: 'tc-search', args: '{"filters":{"status":"open"}}' },
+      ]);
+    });
+
+    it('passes no calls to the outcome without the opt-in', async () => {
+      const { fetchImpl } = fakeFetch(searchStream);
+      const runCell = buildAgUiRunCell(TARGET, (target) => createAgUiClient(target, fetchImpl));
+      const outcome = await runCell({ id: 'c', inputIndex: 0, content: 'x' });
+      expect(outcome).not.toHaveProperty('toolCalls');
+    });
+
+    it('passes each turn’s calls through on the multi-turn builder when the run opts in', async () => {
+      const { createClient } = fakeClientFactory(
+        vi.fn(async (): Promise<AgUiRunResult> => ({
+          answer: 'ok',
+          tools: ['search'],
+          toolCalls: [{ name: 'search', args: '{"page":1}' }],
+        }))
+      );
+      const runConversation = buildAgUiRunConversation(TARGET, createClient, {
+        recordToolCalls: true,
+      });
+      const outcomes = await runConversation(['first', 'second']);
+      expect(outcomes.map((outcome) => outcome.toolCalls)).toEqual([
+        [{ name: 'search', args: '{"page":1}' }],
+        [{ name: 'search', args: '{"page":1}' }],
+      ]);
     });
   });
 });
