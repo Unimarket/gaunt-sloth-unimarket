@@ -112,6 +112,6 @@ Next:
 
 1. Add `scripts/patches.txt`, then write `assemble-integration.sh` and `make-bundle.mjs`.
 2. Patch 3 (argument capture), then patch 4 (empty-trace guard). Patch 3 is estimated at about four files; use it to calibrate the build and test loop.
-3. Check patch 1's two suspected defects against real Vertex output, since neither reproduced offline. Close the patch if they do not.
+3. Check patch 1's two suspected defects on the first real run, as described under its status (inconclusive offline). Close the patch if neither shows up.
 4. Discuss patch 2 with the maintainer before coding.
 5. Cut the first bundle.
