@@ -16,7 +16,7 @@ Requirement outlines only, in priority order. Code references are to `gaunt-slot
 |---|---|---|---|
 | 1 | Verify two suspected data defects | 0 | not needed to start; inspect the first real results (see status) |
 | 2 | MCP server instructions as system text, and record the prompt | 0 | none; results for rule-based cases may not be representative |
-| 3 | Tool-call argument capture and assertion | 0 | grade arguments only through results and answers |
+| 3 | Tool-call argument capture and assertion | 0 | upstream `evalToolCallArgs` and `tool_call_json_path` (merged 2026-10-03) cover the core; this branch adds the items listed under its status |
 | 4 | Guard against empty traces | 0 | add a companion `must_call` to every `must_not_call` case |
 | 5 | Call-order and call-count assertions | 1 | `must_call` for both tools, order unchecked |
 | 6 | `must_not_error` | 1 | none for a successful-but-wrong call; use the judge |
@@ -48,11 +48,13 @@ Requirement outlines only, in priority order. Code references are to `gaunt-slot
      - the composed system prompt, or at least its length and a hash, recorded in each cell's output so a run shows the instructions reached the model.
    - Optional later: run the same cases under both framings to see how sensitive the rules are to framing, which says how they would behave in a third-party client.
 3. **Tool-call argument capture and assertion.**
-   - Record each tool call's arguments alongside its name and result. Today `core/src/core/runStats.ts:203-209` reads the call name and drops `args`. The review estimated about 4 files: `runStats.ts`, `GthToolResult` in core, `ToolResultRecord` in batch, and the suite parser plus a check in `toolChecks.ts`.
-   - Confirmed offline: the server received `{"query":"acme","status":"ACTIVE","pageSize":5}` and the console printed the arguments, but `results.json` and the per-case file hold only the tool name and result.
-   - New check, for example `tool_args`, taking a tool-name pattern, a path into the arguments, and one of `equals`, `matches` (regex), `contains`, `exists` or `absent`.
-   - Define the quantifier: "at least one call satisfies" (like `tool_result_json_path`) and "every call satisfies" as an option.
-   - Needed for cases such as: a lookup tool must not receive a human-readable code where an id is required; an id argument must be a UUID, not an order number; an enum argument must be a value an earlier list call returned.
+   - **Status: superseded in part.** Upstream merged its own implementation (`evalToolCallArgs`, a `toolCalls` list on each case, and `tool_call_json_path`) on 2026-10-03, so the recording and the basic check are no longer ours to contribute.
+   - **What this fork's `patch/p03-tool-args` adds beyond it**, as candidates for small follow-up PRs on top of upstream's design:
+     - recording a tool call the repair step promoted from model text on streamed runs (on upstream `main` the tool runs but `toolCalls` stays empty);
+     - the operators `matches` and `absent: true`;
+     - an `every: true` quantifier;
+     - strict keys, so a misspelt operator is a suite error.
+   - Pull request with the comparison: https://github.com/Unimarket/gaunt-sloth-unimarket/pull/1
 4. **Guard against empty traces.** `must_not_call` passes on an empty trace if capture ever yields nothing. Fail a case whose model made a request but recorded no trace, or require a companion `must_call`.
 
 ### Tier 1: express the designed cases

@@ -111,7 +111,7 @@ Done: upstream `main` at `6dc05ac` builds with Node 24 and pnpm 11; `pack-bundle
 Next:
 
 1. Add `scripts/patches.txt`, then write `assemble-integration.sh` and `make-bundle.mjs`.
-2. Patch 3 (argument capture), then patch 4 (empty-trace guard). Patch 3 is estimated at about four files; use it to calibrate the build and test loop.
+2. Patch 3 is superseded in part by upstream's own change; see [PATCHES.md](PATCHES.md). Next is patch 4 (empty-trace guard), after checking it against upstream `main`.
 3. Check patch 1's two suspected defects on the first real run, as described under its status (inconclusive offline). Close the patch if neither shows up.
 4. Discuss patch 2 with the maintainer before coding.
 5. Cut the first bundle.
