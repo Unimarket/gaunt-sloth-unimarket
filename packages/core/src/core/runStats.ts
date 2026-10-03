@@ -95,6 +95,16 @@ export function capToolResultText(text: string, maxBytes: number): CappedToolRes
   };
 }
 
+/**
+ * One tool call the model requested, held until the `ToolMessage` carrying its `tool_call_id`
+ * arrives. `argsText` is the arguments as JSON text: the serialised `args` of a complete call, or
+ * the concatenated `args` fragments of a streamed one. It is `undefined` when a complete call's
+ * `args` could not be serialised, so the call still occupies its place in the queue for its id.
+ */
+export interface PendingToolCall {
+  argsText?: string;
+}
+
 /** Mutable tally behind {@link finalizeRunStats}; see {@link createRunStatsAccumulator}. */
 export interface RunStatsAccumulator {
   /** Running sum of input/prompt tokens. */
@@ -107,11 +117,115 @@ export interface RunStatsAccumulator {
   tools: Set<string>;
   /** BATCH-21 — one record per executed tool result (`ToolMessage`), in arrival order, un-deduped. */
   toolResults: GthToolResult[];
+  /**
+   * Requested tool calls that no `ToolMessage` has claimed yet, keyed by tool-call id. A queue per
+   * id rather than one entry, because some providers reuse an id within a run: each result claims
+   * the oldest call still waiting under its id.
+   */
+  pendingToolCalls: Map<string, PendingToolCall[]>;
+  /**
+   * The current model round's streamed tool calls, keyed by `tool_call_chunks[].index`. Cleared
+   * when a `ToolMessage` arrives, because providers restart the index at 0 every round.
+   */
+  streamingToolCalls: Map<number, PendingToolCall & { id?: string }>;
 }
 
 /** A fresh, empty accumulator. */
 export function createRunStatsAccumulator(): RunStatsAccumulator {
-  return { input: 0, output: 0, sawUsage: false, tools: new Set<string>(), toolResults: [] };
+  return {
+    input: 0,
+    output: 0,
+    sawUsage: false,
+    tools: new Set<string>(),
+    toolResults: [],
+    pendingToolCalls: new Map(),
+    streamingToolCalls: new Map(),
+  };
+}
+
+function queueToolCall(acc: RunStatsAccumulator, id: string, call: PendingToolCall): void {
+  const queue = acc.pendingToolCalls.get(id);
+  if (queue) queue.push(call);
+  else acc.pendingToolCalls.set(id, [call]);
+}
+
+/**
+ * Record the tool calls one AI message (or message chunk) requests, so their arguments can be
+ * attached to the matching result later.
+ *
+ * - A message carrying `tool_call_chunks` is read from those deltas only. On the streaming path
+ *   every chunk also carries `tool_calls`, but each chunk's are parsed from that chunk's fragment
+ *   alone, so they hold partial (often empty) arguments. The fragments are appended to the call
+ *   open at their `index` until the round's results arrive.
+ * - A delta whose `id` differs from the call open at its `index` starts a new call: a provider that
+ *   sends no `index` puts every call of a round at 0.
+ * - A message with no deltas carries complete `tool_calls`, recorded as they are.
+ * - A call without an id cannot be correlated with a result and is not recorded.
+ */
+function recordRequestedToolCalls(acc: RunStatsAccumulator, m: Record<string, unknown>): void {
+  const deltas = m.tool_call_chunks;
+  if (Array.isArray(deltas) && deltas.length > 0) {
+    for (const delta of deltas) {
+      if (!delta || typeof delta !== 'object') continue;
+      const index = typeof delta.index === 'number' ? delta.index : 0;
+      const id = typeof delta.id === 'string' && delta.id.length > 0 ? delta.id : undefined;
+      let call = acc.streamingToolCalls.get(index);
+      if (call && id && call.id && call.id !== id) call = undefined;
+      if (!call) {
+        call = { argsText: '' };
+        acc.streamingToolCalls.set(index, call);
+      }
+      if (id && !call.id) {
+        call.id = id;
+        queueToolCall(acc, id, call);
+      }
+      if (typeof delta.args === 'string') call.argsText += delta.args;
+    }
+    return;
+  }
+
+  const toolCalls = m.tool_calls;
+  if (!Array.isArray(toolCalls)) return;
+  for (const tc of toolCalls) {
+    const id = tc?.id;
+    if (typeof id !== 'string' || id.length === 0) continue;
+    let argsText: string | undefined;
+    try {
+      argsText = JSON.stringify(tc.args ?? {});
+    } catch {
+      /* fail-soft: an unserialisable `args` is recorded as no arguments */
+    }
+    queueToolCall(acc, id, { argsText });
+  }
+}
+
+/**
+ * Claim the oldest call waiting under `toolCallId` and return its arguments as capped JSON text,
+ * or `undefined` when there is no such call or its arguments could not be serialised.
+ *
+ * Arguments that parse as JSON are re-serialised compactly, so a streamed call and the same call
+ * read from a finished message record identical text. Streamed fragments that do not parse are
+ * kept as the model sent them. An empty streamed buffer is a call with no arguments, recorded as
+ * `{}`, which is what the tool was invoked with.
+ */
+function claimToolCallArgs(
+  acc: RunStatsAccumulator,
+  toolCallId: unknown,
+  maxBytes: number
+): CappedToolResultText | undefined {
+  if (typeof toolCallId !== 'string' || toolCallId.length === 0) return undefined;
+  const queue = acc.pendingToolCalls.get(toolCallId);
+  const call = queue?.shift();
+  if (queue && queue.length === 0) acc.pendingToolCalls.delete(toolCallId);
+  if (call?.argsText === undefined) return undefined;
+
+  let text = call.argsText.trim() === '' ? '{}' : call.argsText;
+  try {
+    text = JSON.stringify(JSON.parse(text));
+  } catch {
+    /* not JSON: kept verbatim */
+  }
+  return capToolResultText(text, maxBytes);
 }
 
 /**
@@ -163,7 +277,10 @@ function toolResultContentText(
  * - tool names from an AIMessage's requested `tool_calls[].name` AND from a `ToolMessage`'s own
  *   `.name` (the executed tool), so both "requested" and "executed" tools are captured, and
  * - (BATCH-21) a per-`ToolMessage` result record — `name` + `isError` (from `.status`) + capped
- *   `content` — into `acc.toolResults`, so tool-RESULT assertions can grade what a tool returned.
+ *   `content` — into `acc.toolResults`, so tool-RESULT assertions can grade what a tool returned,
+ * - and on that record, the capped `args` of the requested call whose id is the result's
+ *   `tool_call_id`, so argument assertions can grade what the model asked the tool to do. A call
+ *   no result answers produces no record; it stays visible to name assertions through `tools`.
  *
  * `configuredMcpServers` is `Object.keys(config.mcpServers)`, used only to resolve which server an
  * errored MCP tool belongs to (BATCH-43; see the record's `errorPayload`). It is passed per fold
@@ -207,9 +324,18 @@ export function accumulateMessage(
         if (typeof name === 'string' && name.length > 0) acc.tools.add(name);
       }
     }
+    recordRequestedToolCalls(acc, m);
 
     // Executed tool result (ToolMessage). Its `.name` is the tool that produced the result.
     const type: unknown = typeof m.getType === 'function' ? m.getType() : m._getType?.();
+    // The arguments of the call this result answers, matched on `tool_call_id`. Claimed for every
+    // result, named or not, so a reused id always pairs each result with its own call.
+    let args: CappedToolResultText | undefined;
+    if (type === 'tool') {
+      // A result closes the round its call was streamed in; the next round's indexes restart at 0.
+      acc.streamingToolCalls.clear();
+      args = claimToolCallArgs(acc, m.tool_call_id, captureMaxBytes);
+    }
     if (type === 'tool' && typeof m.name === 'string' && m.name.length > 0) {
       acc.tools.add(m.name);
       // BATCH-21 — capture the RESULT record too (same capture site, same fail-soft discipline):
@@ -236,6 +362,8 @@ export function accumulateMessage(
       // inferred later from the stored length (see {@link CappedToolResultText}). `contentTruncated`
       // is present only when the cap cut something, so a record that fitted is byte-identical to the
       // one this capture produced before the field existed.
+      // `args` is absent when no requested call carries this result's id. It is capped like
+      // `content`, under the same configured size.
       acc.toolResults.push({
         name: m.name,
         isError,
@@ -244,6 +372,8 @@ export function accumulateMessage(
           ? { contentTruncated: true, contentOriginalBytes: captured.originalBytes }
           : {}),
         ...(errorPayload !== undefined ? { errorPayload } : {}),
+        ...(args !== undefined ? { args: args.text } : {}),
+        ...(args?.truncated ? { argsTruncated: true, argsOriginalBytes: args.originalBytes } : {}),
       });
     }
   } catch {

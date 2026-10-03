@@ -1709,7 +1709,12 @@ describe('GthLangChainAgent', () => {
 
         const stats = traceOf(call, softened);
         expect(stats.toolResults).toEqual([
-          { name: 'mcp__unimarket__contract_search', isError: true, content: message },
+          {
+            name: 'mcp__unimarket__contract_search',
+            isError: true,
+            content: message,
+            args: '{"q":"contracts"}',
+          },
         ]);
         // The name set is unchanged by this (it already saw the REQUESTED call) — the record is
         // what was missing, so assert the trace gained one without disturbing the other half.
@@ -1741,7 +1746,9 @@ describe('GthLangChainAgent', () => {
         );
 
         const stats = traceOf(call, softened);
-        expect(stats.toolResults).toEqual([{ name: 'run_tests', isError: true, content: body }]);
+        expect(stats.toolResults).toEqual([
+          { name: 'run_tests', isError: true, content: body, args: '{"command":"npm test"}' },
+        ]);
         expect(stats.tools).toEqual(['run_tests']);
       });
     });

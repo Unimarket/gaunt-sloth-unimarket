@@ -179,6 +179,20 @@ export interface GthToolResult {
    * each of them.
    */
   errorPayload?: string;
+  /**
+   * The arguments the model passed in the call this result answers, as JSON text, matched by the
+   * call's id (`ToolMessage.tool_call_id`). Arguments that parse are stored in compact form; a
+   * streamed buffer that does not parse is stored as the model sent it. Capped in UTF-8 bytes at
+   * the same `toolResultCaptureMaxBytes` as {@link content}.
+   *
+   * Absent when no requested call carries the result's id, or when the call's arguments could not
+   * be serialised.
+   */
+  args?: string;
+  /** `true` iff {@link args} was cut at the capture cap. Absent when nothing was cut. */
+  argsTruncated?: boolean;
+  /** {@link args}' size in UTF-8 bytes before the cap cut it. Present only with {@link argsTruncated}. */
+  argsOriginalBytes?: number;
 }
 
 /**
