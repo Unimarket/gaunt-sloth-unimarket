@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import {
   accumulateMessage,
   capToolResultText,
@@ -105,8 +105,9 @@ describe('core/runStats', () => {
         name: 'mcp__authz__get_data',
         isError: true,
         content: '{"error":{"code":"MODULE_DISABLED"}}',
+        args: '{}',
       },
-      { name: 'read_file', isError: false, content: 'file body' },
+      { name: 'read_file', isError: false, content: 'file body', args: '{"path":"a.txt"}' },
     ]);
   });
 
@@ -384,6 +385,390 @@ describe('core/runStats', () => {
     expect(Buffer.byteLength(record.content!)).toBe(TOOL_RESULT_CONTENT_CAP);
     expect(record.contentTruncated).toBe(true);
     expect(record.errorPayload).toBeUndefined();
+  });
+
+  describe('tool-call arguments', () => {
+    const fold = (messages: unknown[], captureMaxBytes?: number) => {
+      const acc = createRunStatsAccumulator();
+      for (const message of messages) accumulateMessage(acc, message, [], captureMaxBytes);
+      return finalizeRunStats(acc);
+    };
+
+    /** One streamed delta, as a provider integration emits it: a chunk carrying a single fragment. */
+    const delta = (fields: { index?: number; id?: string; name?: string; args?: string }) =>
+      new AIMessageChunk({
+        content: '',
+        tool_call_chunks: [{ type: 'tool_call_chunk', ...fields }],
+      });
+
+    it('records the arguments of the call whose id the result carries', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'search', args: { query: 'acme', limit: 3 } }],
+        }),
+        new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+      ]);
+      expect(stats.toolResults).toEqual([
+        { name: 'search', isError: false, content: 'ok', args: '{"query":"acme","limit":3}' },
+      ]);
+    });
+
+    it('leaves a result whose id no call carries exactly as it was', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'search', args: { query: 'acme' } }],
+        }),
+        new ToolMessage({ content: 'ok', tool_call_id: 'other', name: 'search' }),
+      ]);
+      expect(stats.toolResults).toEqual([{ name: 'search', isError: false, content: 'ok' }]);
+      expect(Object.keys(stats.toolResults![0])).toEqual(['name', 'isError', 'content']);
+    });
+
+    it('records no arguments for a call that carries no id', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [{ name: 'search', args: { query: 'acme' } }],
+        }),
+        new ToolMessage({ content: 'ok', tool_call_id: '', name: 'search' }),
+      ]);
+      expect(stats.toolResults).toEqual([{ name: 'search', isError: false, content: 'ok' }]);
+    });
+
+    it('adds no record for a call no result answers, while its name is still recorded', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'c1', name: 'search', args: { query: 'acme' } },
+            { id: 'c2', name: 'delete_all', args: { confirm: true } },
+          ],
+        }),
+        new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+      ]);
+      expect(stats.tools.sort()).toEqual(['delete_all', 'search']);
+      expect(stats.toolResults).toEqual([
+        { name: 'search', isError: false, content: 'ok', args: '{"query":"acme"}' },
+      ]);
+    });
+
+    it('pairs each of several calls to the same tool with its own arguments', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'search', args: { query: 'first' } }],
+        }),
+        new ToolMessage({ content: 'one', tool_call_id: 'c1', name: 'search' }),
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'c2', name: 'search', args: { query: 'second' } }],
+        }),
+        new ToolMessage({ content: 'two', tool_call_id: 'c2', name: 'search' }),
+      ]);
+      expect(stats.toolResults!.map((r) => [r.content, r.args])).toEqual([
+        ['one', '{"query":"first"}'],
+        ['two', '{"query":"second"}'],
+      ]);
+    });
+
+    it('pairs parallel calls by id whatever order their results arrive in', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'a', name: 'search', args: { query: 'alpha' } },
+            { id: 'b', name: 'read_file', args: { path: 'b.txt' } },
+            { id: 'c', name: 'search', args: { query: 'gamma' } },
+          ],
+        }),
+        new ToolMessage({ content: 'C', tool_call_id: 'c', name: 'search' }),
+        new ToolMessage({ content: 'A', tool_call_id: 'a', name: 'search' }),
+        new ToolMessage({ content: 'B', tool_call_id: 'b', name: 'read_file' }),
+      ]);
+      expect(stats.toolResults!.map((r) => [r.content, r.args])).toEqual([
+        ['C', '{"query":"gamma"}'],
+        ['A', '{"query":"alpha"}'],
+        ['B', '{"path":"b.txt"}'],
+      ]);
+    });
+
+    it('pairs results with calls in order when a provider reuses an id', () => {
+      const stats = fold([
+        // Two calls under one id in a single round...
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'call_0', name: 'search', args: { query: 'one' } },
+            { id: 'call_0', name: 'search', args: { query: 'two' } },
+          ],
+        }),
+        new ToolMessage({ content: 'r1', tool_call_id: 'call_0', name: 'search' }),
+        new ToolMessage({ content: 'r2', tool_call_id: 'call_0', name: 'search' }),
+        // ...and the same id again in the next round.
+        new AIMessage({
+          content: '',
+          tool_calls: [{ id: 'call_0', name: 'search', args: { query: 'three' } }],
+        }),
+        new ToolMessage({ content: 'r3', tool_call_id: 'call_0', name: 'search' }),
+        // A fourth result under the id has no call left to claim.
+        new ToolMessage({ content: 'r4', tool_call_id: 'call_0', name: 'search' }),
+      ]);
+      expect(stats.toolResults!.map((r) => [r.content, r.args])).toEqual([
+        ['r1', '{"query":"one"}'],
+        ['r2', '{"query":"two"}'],
+        ['r3', '{"query":"three"}'],
+        ['r4', undefined],
+      ]);
+    });
+
+    it('lets a nameless result claim its call, so the next result under the id gets its own', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'x', name: 'search', args: { query: 'one' } },
+            { id: 'x', name: 'search', args: { query: 'two' } },
+          ],
+        }),
+        new ToolMessage({ content: 'dropped', tool_call_id: 'x', name: '' }),
+        new ToolMessage({ content: 'kept', tool_call_id: 'x', name: 'search' }),
+      ]);
+      expect(stats.toolResults).toEqual([
+        { name: 'search', isError: false, content: 'kept', args: '{"query":"two"}' },
+      ]);
+    });
+
+    it('records empty and non-object arguments as the JSON the model sent', () => {
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'e', name: 'ping', args: {} },
+            // Not what a typed provider produces, but what an untyped one can hand over.
+            { id: 's', name: 'echo', args: 'plain text' as unknown as Record<string, unknown> },
+            { id: 'n', name: 'echo', args: [1, 2] as unknown as Record<string, unknown> },
+          ],
+        }),
+        new ToolMessage({ content: 'pong', tool_call_id: 'e', name: 'ping' }),
+        new ToolMessage({ content: 's', tool_call_id: 's', name: 'echo' }),
+        new ToolMessage({ content: 'n', tool_call_id: 'n', name: 'echo' }),
+      ]);
+      expect(stats.toolResults!.map((r) => r.args)).toEqual(['{}', '"plain text"', '[1,2]']);
+    });
+
+    it('records no arguments, and still pairs later results, when arguments cannot be serialised', () => {
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      const stats = fold([
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { id: 'x', name: 'search', args: { big: BigInt(1) } },
+            { id: 'x', name: 'search', args: circular },
+            { id: 'x', name: 'search', args: { query: 'fine' } },
+          ],
+        }),
+        new ToolMessage({ content: 'r1', tool_call_id: 'x', name: 'search' }),
+        new ToolMessage({ content: 'r2', tool_call_id: 'x', name: 'search' }),
+        new ToolMessage({ content: 'r3', tool_call_id: 'x', name: 'search' }),
+      ]);
+      expect(stats.toolResults).toEqual([
+        { name: 'search', isError: false, content: 'r1' },
+        { name: 'search', isError: false, content: 'r2' },
+        { name: 'search', isError: false, content: 'r3', args: '{"query":"fine"}' },
+      ]);
+    });
+
+    it('caps arguments at the capture cap and records the cut', () => {
+      const query = 'q'.repeat(TOOL_RESULT_CONTENT_CAP);
+      const full = JSON.stringify({ query });
+      const stats = fold([
+        new AIMessage({ content: '', tool_calls: [{ id: 'c1', name: 'search', args: { query } }] }),
+        new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+      ]);
+      const record = stats.toolResults![0];
+      expect(Buffer.byteLength(record.args!)).toBe(TOOL_RESULT_CONTENT_CAP);
+      expect(record.args).toBe(full.slice(0, TOOL_RESULT_CONTENT_CAP));
+      expect(record.argsTruncated).toBe(true);
+      expect(record.argsOriginalBytes).toBe(Buffer.byteLength(full));
+      // The cut belongs to the arguments alone: the result payload fitted and says nothing.
+      expect(record.contentTruncated).toBeUndefined();
+    });
+
+    it('caps arguments at the configured cap, and records nothing extra when they fit', () => {
+      const call = new AIMessage({
+        content: '',
+        tool_calls: [{ id: 'c1', name: 'search', args: { query: 'x'.repeat(50) } }],
+      });
+      const result = new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' });
+
+      const capped = fold([call, result], 20).toolResults![0];
+      expect(capped.args).toBe('{"query":"xxxxxxxxxx');
+      expect(capped.argsTruncated).toBe(true);
+      expect(capped.argsOriginalBytes).toBe(62);
+
+      const whole = fold([call, result]).toolResults![0];
+      expect(whole).toEqual({
+        name: 'search',
+        isError: false,
+        content: 'ok',
+        args: `{"query":"${'x'.repeat(50)}"}`,
+      });
+    });
+
+    it('cuts arguments on a character boundary when the cap falls inside a multi-byte character', () => {
+      // `{"q":"` is 6 bytes and each emoji 4, so a 9-byte cap lands inside the first emoji.
+      const stats = fold(
+        [
+          new AIMessage({
+            content: '',
+            tool_calls: [{ id: 'c1', name: 'search', args: { q: '😀😀' } }],
+          }),
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+        ],
+        9
+      );
+      const record = stats.toolResults![0];
+      expect(record.args).toBe('{"q":"');
+      expect(record.argsTruncated).toBe(true);
+      expect(record.argsOriginalBytes).toBe(Buffer.byteLength('{"q":"😀😀"}'));
+    });
+
+    describe('streamed calls', () => {
+      it('records the final arguments once, ignoring partial and nameless continuation chunks', () => {
+        const chunks = [
+          delta({ index: 0, id: 'c1', name: 'search', args: '' }),
+          delta({ index: 0, args: '{"query": "ac' }),
+          delta({ index: 0, args: 'me", "filters": {"state": ' }),
+          delta({ index: 0, args: '"CONNECTED"}}' }),
+        ];
+        // Each chunk's own `tool_calls` is parsed from its fragment alone, which is what must
+        // not be recorded: the first carries the name with empty arguments, the rest no name.
+        expect(chunks[0].tool_calls).toEqual([
+          { name: 'search', args: {}, id: 'c1', type: 'tool_call' },
+        ]);
+        const stats = fold([
+          ...chunks,
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+        ]);
+        expect(stats.tools).toEqual(['search']);
+        expect(stats.toolResults).toEqual([
+          {
+            name: 'search',
+            isError: false,
+            content: 'ok',
+            args: '{"query":"acme","filters":{"state":"CONNECTED"}}',
+          },
+        ]);
+      });
+
+      it('records the same record a finished message produces for the same call', () => {
+        const chunks = [
+          delta({ index: 0, id: 'a', name: 'search', args: '{"query":' }),
+          delta({ index: 1, id: 'b', name: 'read_file', args: '{"path"' }),
+          delta({ index: 0, args: ' "acme"}' }),
+          delta({ index: 1, args: ': "b.txt"}' }),
+        ];
+        const results = [
+          new ToolMessage({ content: 'B', tool_call_id: 'b', name: 'read_file' }),
+          new ToolMessage({ content: 'A', tool_call_id: 'a', name: 'search' }),
+        ];
+        const aggregated = chunks.reduce((sum, chunk) => sum.concat(chunk));
+        const finished = new AIMessage({ content: '', tool_calls: aggregated.tool_calls });
+
+        const streamed = fold([...chunks, ...results]);
+        expect(streamed.toolResults).toEqual(fold([finished, ...results]).toolResults);
+        // An aggregate of the chunks, which is what the model node hands the graph, folds the same.
+        expect(streamed.toolResults).toEqual(fold([aggregated, ...results]).toolResults);
+        expect(streamed.toolResults!.map((r) => r.args)).toEqual([
+          '{"path":"b.txt"}',
+          '{"query":"acme"}',
+        ]);
+      });
+
+      it('splits calls that share an index when their ids differ', () => {
+        // A provider that sends no index puts every call of a round at 0.
+        const stats = fold([
+          delta({ id: 'a', name: 'search', args: '{"query":"one"}' }),
+          delta({ id: 'b', name: 'search', args: '{"query":"two"}' }),
+          new ToolMessage({ content: 'A', tool_call_id: 'a', name: 'search' }),
+          new ToolMessage({ content: 'B', tool_call_id: 'b', name: 'search' }),
+        ]);
+        expect(stats.toolResults!.map((r) => r.args)).toEqual([
+          '{"query":"one"}',
+          '{"query":"two"}',
+        ]);
+      });
+
+      it('starts a new round after a result, so a restarted index does not extend the last call', () => {
+        const stats = fold([
+          delta({ index: 0, id: 'c1', name: 'search', args: '{"query":"one"}' }),
+          new ToolMessage({ content: '1', tool_call_id: 'c1', name: 'search' }),
+          delta({ index: 0, name: 'search', args: '{"query":' }),
+          delta({ index: 0, id: 'c2', args: '"two"}' }),
+          new ToolMessage({ content: '2', tool_call_id: 'c2', name: 'search' }),
+        ]);
+        expect(stats.toolResults!.map((r) => r.args)).toEqual([
+          '{"query":"one"}',
+          '{"query":"two"}',
+        ]);
+      });
+
+      it('records a streamed call with no argument fragments as {}', () => {
+        const stats = fold([
+          delta({ index: 0, id: 'c1', name: 'ping' }),
+          new ToolMessage({ content: 'pong', tool_call_id: 'c1', name: 'ping' }),
+        ]);
+        expect(stats.toolResults![0].args).toBe('{}');
+      });
+
+      it('keeps a streamed buffer that is not JSON as the model sent it', () => {
+        const stats = fold([
+          delta({ index: 0, id: 'c1', name: 'step', args: '{"n":3}' }),
+          delta({ index: 0, args: '{}' }),
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'step' }),
+        ]);
+        expect(stats.toolResults![0].args).toBe('{"n":3}{}');
+      });
+
+      it('keeps a streamed buffer the model stopped part-way through as it arrived', () => {
+        const stats = fold([
+          delta({ index: 0, id: 'c1', name: 'search', args: '{"query": "ac' }),
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+        ]);
+        expect(stats.toolResults![0].args).toBe('{"query": "ac');
+      });
+
+      it('caps a streamed buffer like any other arguments', () => {
+        const stats = fold(
+          [
+            delta({ index: 0, id: 'c1', name: 'search', args: '{"query":"' }),
+            delta({ index: 0, args: `${'z'.repeat(30)}"}` }),
+            new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+          ],
+          16
+        );
+        expect(stats.toolResults![0]).toMatchObject({
+          args: '{"query":"zzzzzz',
+          argsTruncated: true,
+          argsOriginalBytes: 42,
+        });
+      });
+
+      it('records a chunk carrying complete tool calls, without deltas, as complete', () => {
+        const chunk = new AIMessageChunk({
+          content: '',
+          tool_calls: [{ id: 'c1', name: 'search', args: { query: 'acme' }, type: 'tool_call' }],
+        });
+        const stats = fold([
+          chunk,
+          new ToolMessage({ content: 'ok', tool_call_id: 'c1', name: 'search' }),
+        ]);
+        expect(stats.toolResults![0].args).toBe('{"query":"acme"}');
+      });
+    });
   });
 
   it('is fail-soft on malformed / non-message input (never throws)', () => {
