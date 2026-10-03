@@ -238,6 +238,10 @@
       "kind": "function"
     },
     {
+      "name": "suiteUsesToolCallArgs",
+      "kind": "function"
+    },
+    {
       "name": "writeBatchOutput",
       "kind": "function"
     },

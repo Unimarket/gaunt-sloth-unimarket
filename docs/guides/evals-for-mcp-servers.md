@@ -140,6 +140,19 @@ Several content blocks arrive as the blocks, with the text one hop further in at
           - { tool: "mcp__unimarket__contract*", path: "structuredContent.contracts[0].type", contains: "SUPPLY" }
 ```
 
+When it matters what the agent *asked* the server for — that the admin's search was scoped to
+active contracts rather than everything — assert on the call's arguments with
+`tool_call_json_path`. It takes the same entries, read against the arguments the model sent, and
+needs `"evalToolCallArgs": true` in the project config
+(`.gsloth/.gsloth-settings/.gsloth.config.json`). Put it there, not in an identity's profile: it is a
+setting of the run, and the matrix reads it from the config the run starts with:
+
+```yaml
+      - identities: [admin]
+        tool_call_json_path:
+          - { tool: "mcp__unimarket__contract_search", path: "status", equals: "ACTIVE" }
+```
+
 ### 5. A separate, stronger, non-MCP judge
 
 The `judge_profile: judge` above is its own profile directory too:
@@ -167,7 +180,8 @@ TeamCity, GitHub Actions, and friends ingest natively. `eval` never waits on std
 ## Related
 
 - Eval basics — writing a first suite, judges, reporters: [Evaluate your agent](evals.md).
-- Every suite key and assertion, including `must_error` / `tool_result_json_path` details:
+- Every suite key and assertion, including `must_error` / `tool_result_json_path` /
+  `tool_call_json_path` details:
   [Commands → eval](../COMMANDS.md#eval).
 - Connecting MCP servers, static auth headers, OAuth, TLS trust: [MCP](../configuration/mcp.md).
 - Profiles in depth: [Identity profiles](../configuration/profiles.md#identity-profiles).

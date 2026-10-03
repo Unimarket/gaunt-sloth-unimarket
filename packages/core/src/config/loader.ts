@@ -29,6 +29,7 @@ import {
   findUnknownTopLevelKeys,
   formatConfigValidationError,
   evalReportersSchema,
+  evalToolCallArgsSchema,
   evalToolCoverageSchema,
   formatDeprecatedConfigIssues,
   isRecordConfig,
@@ -1063,6 +1064,8 @@ export interface RunLevelEvalConfig {
   evalToolCoverage?: EvalToolCoverageConfig;
   /** The validated `reporters` map, or `undefined` when the base config does not set it. */
   reporters?: Record<string, string>;
+  /** BATCH-52 — the validated `evalToolCallArgs` value, or `undefined` when the base config does not set it. */
+  evalToolCallArgs?: boolean;
 }
 
 /**
@@ -1084,8 +1087,8 @@ export async function loadConfiguredEvalToolCoverage(
 }
 
 /**
- * BATCH-48 / BATCH-51 — the run-level `gth eval` settings (`evalToolCoverage`, `reporters`) of the
- * run's BASE config, read once, before `gth eval` runs any suite.
+ * BATCH-48 / BATCH-51 / BATCH-52 — the run-level `gth eval` settings (`evalToolCoverage`,
+ * `reporters`, `evalToolCallArgs`) of the run's BASE config, read once, before `gth eval` runs any suite.
  *
  * ## Why a reader, and not a config the eval command already builds
  *
@@ -1110,7 +1113,7 @@ export async function loadConfiguredEvalToolCoverage(
  *
  * It does not validate the whole config: every suite's own `initConfig` does that and reports it,
  * and warning twice about one file is worse than not warning here. The keys it reads it validates
- * with `evalToolCoverageSchema` and `evalReportersSchema` — the same rules the full parse applies —
+ * with `evalToolCoverageSchema`, `evalReportersSchema` and `evalToolCallArgsSchema` — the same rules the full parse applies —
  * and a malformed value THROWS: a floor that failed to parse must not quietly become no floor,
  * because a floor quietly skipped reports green forever over a run it never measured.
  *
@@ -1199,6 +1202,16 @@ export async function loadRunLevelEvalConfig(
       );
     }
     result.reporters = parsed.data;
+  }
+  if (raw.evalToolCallArgs !== undefined) {
+    const parsed = evalToolCallArgsSchema.safeParse(raw.evalToolCallArgs);
+    if (!parsed.success) {
+      throw new ConfigDiscoveryError(
+        `Invalid evalToolCallArgs in ${sourceLabel}:\n${formatConfigValidationError(parsed.error)}`,
+        { sourceLabel }
+      );
+    }
+    result.evalToolCallArgs = parsed.data;
   }
   return result;
 }

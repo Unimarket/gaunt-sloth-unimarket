@@ -1052,10 +1052,15 @@ cases:
           type: 'ag-ui',
           url: 'http://localhost:3000',
           agentId: 'gth',
-        })
+        }),
+        undefined,
+        // BATCH-52 — no `evalToolCallArgs` in the run-level config, so no arguments are recorded.
+        { recordToolCalls: false }
       );
       expect(agUiRunnerMock.buildAgUiRunConversation).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'ag-ui', url: 'http://localhost:3000', agentId: 'gth' })
+        expect.objectContaining({ type: 'ag-ui', url: 'http://localhost:3000', agentId: 'gth' }),
+        undefined,
+        { recordToolCalls: false }
       );
       // ...and NOT the in-process gth-agent path or the ADK path.
       expect(runSingleShot).not.toHaveBeenCalled();
@@ -2418,6 +2423,116 @@ cases:
       await program.parseAsync(['na', 'na', 'eval', 'suite.yaml', '-o', outputDir]);
 
       expect(consoleUtilsMock.displayInfo).not.toHaveBeenCalled();
+    });
+  });
+  // BATCH-52 — tool-call argument assertions need the `evalToolCallArgs` opt-in in the run-level
+  // config; with it, the gth-agent runner passes each call's arguments through to the results.
+  describe('tool-call arguments (BATCH-52)', () => {
+    const ARGS_SUITE = `
+target: { type: gth-agent }
+cases:
+  - id: searched-open
+    prompt: "find open orders"
+    tool_call_json_path:
+      - { tool: mcp__shop__search, path: filters.status, equals: open }
+`;
+    const searchCalls = [
+      { name: 'mcp__shop__search', id: 'c1', args: '{"filters":{"status":"open"}}' },
+    ];
+
+    beforeEach(() => {
+      fileUtilsMock.readFileFromProjectDir.mockImplementation((file: string) => {
+        if (file === 'args-suite.yaml') return ARGS_SUITE;
+        if (file === 'suite.yaml') return SIMPLE_SUITE;
+        throw new Error(`unexpected file read: ${file}`);
+      });
+      runSingleShot.mockResolvedValue({
+        ok: true,
+        answer: 'hello there',
+        tools: ['mcp__shop__search'],
+        toolCalls: searchCalls,
+      });
+    });
+
+    it('refuses a suite using tool_call_json_path without the opt-in, running nothing (exit 2)', async () => {
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync(['na', 'na', 'eval', 'args-suite.yaml', '-o', outputDir]);
+
+      expect(systemUtilsMock.setExitCode).toHaveBeenCalledWith(2);
+      expect(consoleUtilsMock.displayError).toHaveBeenCalledWith(
+        expect.stringContaining('set "evalToolCallArgs": true')
+      );
+      expect(runSingleShot).not.toHaveBeenCalled();
+    });
+
+    it('grades the arguments and writes them to the case file when the run opts in', async () => {
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
+        evalToolCallArgs: true,
+      });
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync(['na', 'na', 'eval', 'args-suite.yaml', '-o', outputDir]);
+
+      expect(systemUtilsMock.setExitCode).not.toHaveBeenCalled();
+      const caseJson = JSON.parse(readFileSync(join(outputDir, 'searched-open.json'), 'utf8'));
+      expect(caseJson).toMatchObject({ verdict: 'PASS', toolCalls: searchCalls });
+    });
+
+    it('passes each turn’s arguments through the multi-turn runner when the run opts in', async () => {
+      configMock.loadRunLevelEvalConfig.mockResolvedValue({
+        found: true,
+        layer: 'project',
+        evalToolCallArgs: true,
+      });
+      fileUtilsMock.readFileFromProjectDir.mockImplementation(
+        () => `
+target: { type: gth-agent }
+cases:
+  - id: paged
+    turns:
+      - user: "page one"
+        tool_call_json_path: [{ tool: search, path: page, equals: 1 }]
+      - user: "page two"
+        tool_call_json_path: [{ tool: search, path: page, equals: 2 }]
+`
+      );
+      runConversation.mockResolvedValue([
+        {
+          ok: true,
+          answer: 'p1',
+          tools: ['search'],
+          toolCalls: [{ name: 'search', args: '{"page":1}' }],
+        },
+        {
+          ok: true,
+          answer: 'p2',
+          tools: ['search'],
+          toolCalls: [{ name: 'search', args: '{"page":2}' }],
+        },
+      ]);
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync(['na', 'na', 'eval', 'paged.yaml', '-o', outputDir]);
+
+      const caseJson = JSON.parse(readFileSync(join(outputDir, 'paged.json'), 'utf8'));
+      expect(caseJson.verdict).toBe('PASS');
+      expect(caseJson.turns[1].toolCalls).toEqual([{ name: 'search', args: '{"page":2}' }]);
+    });
+
+    it('leaves the arguments out of the case file when the run does not opt in', async () => {
+      const { evalCommand } = await import('#src/commands/evalCommand.js');
+      const program = new Command();
+      evalCommand(program, {});
+      await program.parseAsync(['na', 'na', 'eval', 'suite.yaml', '-o', outputDir]);
+
+      const caseJson = JSON.parse(readFileSync(join(outputDir, 'greets-politely.json'), 'utf8'));
+      expect(caseJson).not.toHaveProperty('toolCalls');
     });
   });
 });

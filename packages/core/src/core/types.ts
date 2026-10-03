@@ -133,6 +133,35 @@ export interface GthRunStats {
    * simply omit it; {@link @gaunt-sloth/core!core/runStats.finalizeRunStats | finalizeRunStats} always sets it.
    */
   toolResults?: GthToolResult[];
+  /**
+   * BATCH-52 — one record per tool call the model requested during the run, with the arguments it
+   * sent, in request order and NOT deduplicated. `gth eval` writes these and grades
+   * `tool_call_json_path` against them only when `evalToolCallArgs` is set. Optional (additive):
+   * producers that predate the field omit it; {@link @gaunt-sloth/core!core/runStats.finalizeRunStats | finalizeRunStats} always sets it.
+   */
+  toolCalls?: GthToolCall[];
+}
+
+/**
+ * BATCH-52 — one tool call the model requested, with its arguments, harvested by the run-stats
+ * accumulator (`core/runStats.ts`) from the assistant message — whole on the non-streaming path,
+ * reassembled from `tool_call_chunks` on the streaming ones.
+ */
+export interface GthToolCall {
+  /** The requested tool's name. */
+  name: string;
+  /** The provider's tool-call id, when it sent one; the matching result's `tool_call_id`. */
+  id?: string;
+  /**
+   * The arguments as JSON text, capped in UTF-8 bytes at capture by the same limit as a result's
+   * payload (`toolResultCaptureMaxBytes`). Streamed arguments are the concatenated deltas exactly
+   * as the model sent them, so they may not parse when the model produced invalid JSON.
+   */
+  args?: string;
+  /** `true` iff {@link args} was cut at the capture cap. Absent when nothing was cut. */
+  argsTruncated?: boolean;
+  /** {@link args}' size in UTF-8 bytes before the cap cut it. Present only with {@link argsTruncated}. */
+  argsOriginalBytes?: number;
 }
 
 /**

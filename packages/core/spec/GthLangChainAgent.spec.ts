@@ -1981,7 +1981,7 @@ describe('GthLangChainAgent', () => {
         return middleware.find((m) => m.name === 'GthMiddlewareToolCallRepair');
       };
 
-      async function initWithTool() {
+      async function initWithTool(config: Partial<GthConfig> = {}) {
         const agent = new GthLangChainAgent(statusUpdateCallback, {
           resolveTools: vi.fn().mockResolvedValue([]),
           resolveMiddleware: async (m) => m ?? [],
@@ -1991,6 +1991,7 @@ describe('GthLangChainAgent', () => {
           'code',
           {
             ...mockConfig,
+            ...config,
             tools: [{ name: 'get_weather', invoke: vi.fn(), description: 'x' }],
           } as GthConfig,
           new MemorySaver()
@@ -2029,6 +2030,30 @@ describe('GthLangChainAgent', () => {
           name: 'get_weather',
           args: { city: 'Paris' },
         });
+      });
+
+      it('records the promoted call in the run stats, with its arguments', async () => {
+        const agent = await initWithTool();
+        const repair = getRepairMw();
+
+        const textMsg = new AIMessage({ id: 'lc1', content: '[tool:get_weather]{"city":"Paris"}' });
+        const promoted = repair!.afterModel!({ messages: [textMsg] }).messages[0];
+
+        expect(agent.getRunStats().toolCalls).toEqual([
+          { name: 'get_weather', id: promoted.tool_calls[0].id, args: '{"city":"Paris"}' },
+        ]);
+      });
+
+      it('caps the promoted call’s arguments at the configured toolResultCaptureMaxBytes', async () => {
+        const agent = await initWithTool({ toolResultCaptureMaxBytes: 8 });
+        const repair = getRepairMw();
+
+        const textMsg = new AIMessage({ id: 'lc1', content: '[tool:get_weather]{"city":"Paris"}' });
+        repair!.afterModel!({ messages: [textMsg] });
+
+        expect(agent.getRunStats().toolCalls).toMatchObject([
+          { args: '{"city":', argsTruncated: true },
+        ]);
       });
 
       it('leaves a native-tool_calls message untouched (returns state unchanged — happy path)', async () => {

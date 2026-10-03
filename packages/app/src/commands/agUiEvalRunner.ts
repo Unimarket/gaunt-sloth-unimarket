@@ -15,7 +15,9 @@
  *
  * KEY DIFFERENCE from the ADK (A2A) runner: the AG-UI wire DOES stream the agent's tool calls
  * (`TOOL_CALL_START`). So this runner CAPTURES each `TOOL_CALL_START`'s `toolCallName` into the
- * outcome's `tools`, and `must_call`/`must_not_call` grade normally — unlike the adk-agent target,
+ * outcome's `tools`, and `must_call`/`must_not_call` grade normally. BATCH-52 — it also reassembles
+ * each call's arguments from its `TOOL_CALL_ARGS` deltas, passed through as `toolCalls` only when
+ * the run opts in with `evalToolCallArgs`, so `tool_call_json_path` grades here too — unlike the adk-agent target,
  * where the tool trace is invisible and those assertions are rejected at parse time. AG-UI carries
  * no token accounting either, so `tokensInput`/`tokensOutput` are left unset (undefined).
  *
@@ -35,6 +37,7 @@ import type {
   AgUiAgentTarget,
   RunCellFn,
   RunConversationFn,
+  ToolCallRecord,
   TurnRunOutcome,
 } from '@gaunt-sloth/batch';
 
@@ -61,6 +64,15 @@ export interface AgUiRunInput {
 export interface AgUiRunResult {
   answer: string;
   tools: string[];
+  /** BATCH-52 — each started call with the arguments reassembled from its `TOOL_CALL_ARGS` deltas,
+   * in start order. Optional so a test fake may omit it. */
+  toolCalls?: ToolCallRecord[];
+}
+
+/** BATCH-52 — options for the AG-UI runner builders. */
+export interface AgUiRunnerOptions {
+  /** Pass each run's `toolCalls` through to the outcome (the run-level `evalToolCallArgs`). */
+  recordToolCalls?: boolean;
 }
 
 /**
@@ -87,7 +99,9 @@ export type FetchLike = typeof fetch;
  * an empty payload that is ignored, so both framings decode identically). Each frame's `data:`
  * payload is JSON-parsed and the relevant event types folded:
  * - `TEXT_MESSAGE_CONTENT` → append `delta` to the CURRENT assistant message (keyed by `messageId`).
- * - `TOOL_CALL_START` → capture `toolCallName` into `tools`.
+ * - `TOOL_CALL_START` → capture `toolCallName` into `tools`, and open a call record under its
+ *   `toolCallId` (BATCH-52).
+ * - `TOOL_CALL_ARGS` → append `delta` to the arguments of the call with that `toolCallId`.
  * - `RUN_ERROR` → remember the message; the run FAILED.
  * - `RUN_FINISHED` → the terminal success signal.
  *
@@ -109,6 +123,8 @@ async function decodeAgUiStream(body: ReadableStream<Uint8Array>): Promise<AgUiR
   let currentMessageId: string | undefined;
   let startedAnswer = false;
   const tools: string[] = [];
+  const toolCalls: ToolCallRecord[] = [];
+  const callsById = new Map<string, ToolCallRecord>();
   let runError: string | undefined;
   let sawRunFinished = false;
 
@@ -123,6 +139,7 @@ async function decodeAgUiStream(body: ReadableStream<Uint8Array>): Promise<AgUiR
       type?: string;
       delta?: unknown;
       toolCallName?: unknown;
+      toolCallId?: unknown;
       message?: unknown;
       messageId?: unknown;
     };
@@ -147,7 +164,23 @@ async function decodeAgUiStream(body: ReadableStream<Uint8Array>): Promise<AgUiR
         }
         break;
       case EventType.TOOL_CALL_START:
-        if (typeof event.toolCallName === 'string') tools.push(event.toolCallName);
+        if (typeof event.toolCallName === 'string') {
+          tools.push(event.toolCallName);
+          const id = typeof event.toolCallId === 'string' ? event.toolCallId : undefined;
+          const call: ToolCallRecord = {
+            name: event.toolCallName,
+            ...(id ? { id } : {}),
+            args: '',
+          };
+          toolCalls.push(call);
+          if (id) callsById.set(id, call);
+        }
+        break;
+      case EventType.TOOL_CALL_ARGS:
+        if (typeof event.toolCallId === 'string' && typeof event.delta === 'string') {
+          const call = callsById.get(event.toolCallId);
+          if (call) call.args = (call.args ?? '') + event.delta;
+        }
         break;
       case EventType.RUN_ERROR:
         runError = typeof event.message === 'string' ? event.message : 'unknown run error';
@@ -188,7 +221,7 @@ async function decodeAgUiStream(body: ReadableStream<Uint8Array>): Promise<AgUiR
       'AG-UI stream ended without a terminal RUN_FINISHED event (truncated or malformed stream).'
     );
   }
-  return { answer: answerParts.join('\n'), tools };
+  return { answer: answerParts.join('\n'), tools, toolCalls };
 }
 
 /**
@@ -325,7 +358,8 @@ export const defaultAgUiClientFactory: AgUiClientFactory = (target) => createAgU
  */
 export function buildAgUiRunCell(
   target: AgUiAgentTarget,
-  createClient: AgUiClientFactory = defaultAgUiClientFactory
+  createClient: AgUiClientFactory = defaultAgUiClientFactory,
+  options: AgUiRunnerOptions = {}
 ): RunCellFn {
   return async (cell) => {
     try {
@@ -335,7 +369,12 @@ export function buildAgUiRunCell(
         runId: randomUUID(),
         messages: [{ id: randomUUID(), role: 'user', content: cell.content }],
       });
-      return { ok: true, answer: result.answer, tools: result.tools };
+      return {
+        ok: true,
+        answer: result.answer,
+        tools: result.tools,
+        ...(options.recordToolCalls ? { toolCalls: result.toolCalls ?? [] } : {}),
+      };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -356,7 +395,8 @@ export function buildAgUiRunCell(
  */
 export function buildAgUiRunConversation(
   target: AgUiAgentTarget,
-  createClient: AgUiClientFactory = defaultAgUiClientFactory
+  createClient: AgUiClientFactory = defaultAgUiClientFactory,
+  options: AgUiRunnerOptions = {}
 ): RunConversationFn {
   return async (userMessages) => {
     const client = createClient(target);
@@ -378,7 +418,12 @@ export function buildAgUiRunConversation(
         });
         // Thread the assistant's answer into the history so the next turn carries it (memory).
         messages.push({ id: randomUUID(), role: 'assistant', content: result.answer });
-        outcomes.push({ ok: true, answer: result.answer, tools: result.tools });
+        outcomes.push({
+          ok: true,
+          answer: result.answer,
+          tools: result.tools,
+          ...(options.recordToolCalls ? { toolCalls: result.toolCalls ?? [] } : {}),
+        });
       } catch (error) {
         outcomes.push({
           ok: false,

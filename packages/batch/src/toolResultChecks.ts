@@ -141,6 +141,18 @@ function evaluateResultAgainstCheck(
     return 'result payload is not JSON';
   }
 
+  return gradeJsonPathValue(root, check);
+}
+
+/**
+ * Resolve `check.path` against an already-parsed payload and apply its `equals` / `contains` (or
+ * neither: existence). `undefined` = satisfied, else the reason. Shared by the tool-RESULT check
+ * above and BATCH-52's tool-call ARGUMENT check, which differ only in which payload they parse.
+ */
+export function gradeJsonPathValue(
+  root: unknown,
+  check: Pick<ToolResultJsonPathCheck, 'path' | 'equals' | 'contains'>
+): string | undefined {
   const { found, value } = resolveJsonPath(root, check.path);
   if (!found) {
     return 'path did not resolve';

@@ -79,6 +79,25 @@ export interface ToolResultRecord {
   errorPayload?: string;
 }
 
+/**
+ * BATCH-52 — one tool call the model requested, with the arguments it sent (a structural mirror
+ * of `@gaunt-sloth/core`'s `GthToolCall`, kept local for the same reason as
+ * {@link ToolResultRecord}). One record per requested call, in request order, NOT deduplicated.
+ * Present on an outcome only when the run opted in with `evalToolCallArgs`.
+ */
+export interface ToolCallRecord {
+  /** The requested tool's name. */
+  name: string;
+  /** The provider's tool-call id, when it sent one. */
+  id?: string;
+  /** The arguments as JSON text, capped at capture; may not parse when the model sent invalid JSON. */
+  args?: string;
+  /** `true` iff {@link args} was cut by the capture cap (`toolResultCaptureMaxBytes`). */
+  argsTruncated?: boolean;
+  /** {@link args}' size in UTF-8 bytes before the cap cut it; present only with {@link argsTruncated}. */
+  argsOriginalBytes?: number;
+}
+
 /** What one attempt at running a cell through the shared single-shot runtime produced. */
 export interface CellRunOutcome {
   /** `true` when the cell's run completed without error; mirrors `runSingleShot`'s contract. */
@@ -100,6 +119,9 @@ export interface CellRunOutcome {
    * {@link tools} but un-deduped and carrying each result's error status + payload. Only the
    * in-process `gth-agent` runner can populate this (external adk-agent/ag-ui targets never do). */
   toolResults?: ToolResultRecord[];
+  /** BATCH-52 — the run's requested tool calls with their arguments. Set only when the run opted
+   * in with `evalToolCallArgs`, by the `gth-agent` and `ag-ui` runners. */
+  toolCalls?: ToolCallRecord[];
   /**
    * BATCH-32 — what the agent ADVERTISED to the model for this cell: the tool-coverage denominator,
    * to {@link tools}'s numerator. Only the in-process `gth-agent` runner can populate it (an

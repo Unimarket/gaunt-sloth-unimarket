@@ -1,6 +1,8 @@
 import { toolNameMatchesPattern } from '@gaunt-sloth/core/utils/toolMatching.js';
 
-import type { EvalExpectation } from '#src/evalTypes.js';
+import type { EvalExpectation, ToolCallJsonPathCheck } from '#src/evalTypes.js';
+import { gradeJsonPathValue } from '#src/toolResultChecks.js';
+import type { ToolCallRecord } from '#src/types.js';
 
 /**
  * BATCH-10 tool-trace assertions — grade a case against the tool *names* it actually invoked
@@ -45,4 +47,73 @@ export function runToolCallChecks(
   }
 
   return failures;
+}
+
+/**
+ * BATCH-52 tool-call ARGUMENT assertions — grade a cell against the arguments its tools were
+ * called WITH (`toolCalls`, captured only when the run sets `evalToolCallArgs`), for a suite where
+ * the fact of the call is not enough.
+ *
+ * Each `tool_call_json_path` entry selects the calls whose name matches its `tool` pattern (the
+ * `must_call` matcher), parses each call's arguments as JSON and applies `path` with `equals` /
+ * `contains` / existence — the same evaluator `tool_result_json_path` uses on a result. The entry
+ * passes iff **at least one** matching call satisfies it; otherwise ONE failure line names the
+ * path, the pattern and the distinct per-call reasons. Arguments cut at the capture cap fail with
+ * a reason naming `toolResultCaptureMaxBytes` rather than being graded as a prefix.
+ */
+export function runToolCallArgChecks(
+  toolCalls: ToolCallRecord[],
+  expectation: Pick<EvalExpectation, 'toolCallJsonPath'>
+): string[] {
+  const failures: string[] = [];
+  for (const check of expectation.toolCallJsonPath) {
+    const failure = checkToolCallJsonPath(toolCalls, check);
+    if (failure !== undefined) failures.push(failure);
+  }
+  return failures;
+}
+
+function checkToolCallJsonPath(
+  toolCalls: ToolCallRecord[],
+  check: ToolCallJsonPathCheck
+): string | undefined {
+  const label = `tool_call_json_path "${check.path}" (tool "${check.tool}")`;
+  const matching = toolCalls.filter((call) => toolNameMatchesPattern(call.name, check.tool));
+  if (matching.length === 0) {
+    return `${label}: no call to a matching tool`;
+  }
+  const reasons = new Set<string>();
+  for (const call of matching) {
+    const reason = evaluateCallAgainstCheck(call, check);
+    if (reason === undefined) return undefined;
+    reasons.add(reason);
+  }
+  return `${label}: ${[...reasons].join('; ')}`;
+}
+
+function evaluateCallAgainstCheck(
+  call: ToolCallRecord,
+  check: ToolCallJsonPathCheck
+): string | undefined {
+  if (call.argsTruncated) {
+    const measured =
+      typeof call.argsOriginalBytes === 'number'
+        ? ` (the call sent ${call.argsOriginalBytes} bytes)`
+        : '';
+    return (
+      'arguments were truncated at toolResultCaptureMaxBytes' +
+      measured +
+      '; raise toolResultCaptureMaxBytes to capture them whole'
+    );
+  }
+  // A call with no arguments at all is graded as an empty object, so its reason is the path
+  // that did not resolve rather than a parse failure the model never caused.
+  const text = (call.args ?? '').trim() || '{}';
+  let root: unknown;
+  try {
+    root = JSON.parse(text);
+  } catch {
+    return 'arguments are not JSON';
+  }
+  return gradeJsonPathValue(root, check);
 }

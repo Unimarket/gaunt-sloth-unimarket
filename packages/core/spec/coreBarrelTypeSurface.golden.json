@@ -437,6 +437,11 @@
       "arity": 0
     },
     {
+      "name": "GthToolCall",
+      "file": "core/types.d.ts",
+      "arity": 0
+    },
+    {
       "name": "GthToolResult",
       "file": "core/types.d.ts",
       "arity": 0

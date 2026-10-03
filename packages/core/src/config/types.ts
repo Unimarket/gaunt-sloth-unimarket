@@ -424,6 +424,16 @@ export interface GthConfig {
    */
   evalToolCoverage?: EvalToolCoverageConfig;
   /**
+   * BATCH-52 — record the arguments of every tool call in `gth eval`'s results and allow suites to
+   * assert on them with `tool_call_json_path`. Run-level: read from the config the run was started
+   * with, never from an identity's profile. Optional with no default; absent, a run records tool
+   * names and results only, and a suite using `tool_call_json_path` is refused.
+   *
+   * Arguments are written to `<case>.json` and `results.json`, and handed to the reporters, exactly
+   * as the model sent them — nothing is redacted.
+   */
+  evalToolCallArgs?: boolean;
+  /**
    * Stream session log instead of writing it when inference streaming is complete.
    * (only works when {@link streamOutput} is true)
    */
