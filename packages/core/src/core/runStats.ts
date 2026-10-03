@@ -269,6 +269,52 @@ function toolResultContentText(
 }
 
 /**
+ * Requested tool calls of an AIMessage / AIMessageChunk: their names (a Set, so repeats collapse)
+ * and, for `tool_call_json_path`, their arguments. Continuation chunks in a streamed
+ * tool call carry an empty name, so the name guard is on a non-empty string.
+ */
+function accumulateRequestedToolCalls(
+  acc: RunStatsAccumulator,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  m: any,
+  captureMaxBytes: number
+): void {
+  const toolCalls = m.tool_calls;
+  if (Array.isArray(toolCalls)) {
+    for (const tc of toolCalls) {
+      const name = tc?.name;
+      if (typeof name === 'string' && name.length > 0) acc.tools.add(name);
+    }
+  }
+  accumulateToolCallArgs(acc, m, captureMaxBytes);
+}
+
+/**
+ * Fold the tool calls of an AI message the tool-call repair promoted from model text into the
+ * accumulator.
+ *
+ * The promoted message keeps the id of the text message it replaces. A streamed run has already
+ * seen that id as plain text and never delivers the promoted message to {@link accumulateMessage},
+ * so the agent hands it here when it promotes it. Only the requested calls are recorded, not usage:
+ * the text message it replaces was already counted.
+ *
+ * The non-streaming path folds the same message through {@link accumulateMessage} as well; the call
+ * is kept once because {@link RunStatsAccumulator.recordedCallIds} already holds its id. Fail-soft.
+ */
+export function accumulatePromotedToolCalls(
+  acc: RunStatsAccumulator,
+  message: unknown,
+  captureMaxBytes: number = TOOL_RESULT_CONTENT_CAP
+): void {
+  try {
+    if (!message || typeof message !== 'object') return;
+    accumulateRequestedToolCalls(acc, message, captureMaxBytes);
+  } catch {
+    /* fail-soft: never let stats capture affect a run */
+  }
+}
+
+/**
  * Fold one LangChain message (or message chunk) into the accumulator. Fail-soft: any unexpected
  * shape is swallowed so a run is never affected. Harvests, when present:
  * - `usage_metadata.input_tokens` / `.output_tokens` (summed; marks `sawUsage`),
@@ -310,17 +356,7 @@ export function accumulateMessage(
       }
     }
 
-    // Requested tool calls (AIMessage / AIMessageChunk). Continuation chunks in a streamed
-    // tool call carry an empty name, so guard on a non-empty string; the Set dedupes repeats.
-    const toolCalls = m.tool_calls;
-    if (Array.isArray(toolCalls)) {
-      for (const tc of toolCalls) {
-        const name = tc?.name;
-        if (typeof name === 'string' && name.length > 0) acc.tools.add(name);
-      }
-    }
-    // BATCH-52 — the same calls with their arguments, for `tool_call_json_path`.
-    accumulateToolCallArgs(acc, m, captureMaxBytes);
+    accumulateRequestedToolCalls(acc, m, captureMaxBytes);
 
     // Executed tool result (ToolMessage). Its `.name` is the tool that produced the result.
     const type: unknown = typeof m.getType === 'function' ? m.getType() : m._getType?.();

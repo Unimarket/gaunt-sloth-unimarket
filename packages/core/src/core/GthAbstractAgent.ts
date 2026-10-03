@@ -22,6 +22,7 @@ import {
 import { resolveToolResultCaptureMaxBytes } from '#src/config/toolResultCapture.js';
 import {
   accumulateMessage,
+  accumulatePromotedToolCalls,
   createRunStatsAccumulator,
   finalizeRunStats,
   type RunStatsAccumulator,
@@ -652,6 +653,18 @@ export abstract class GthAbstractAgent implements GthAgentInterface {
       this.runStatsAcc,
       message,
       Object.keys(this.config?.mcpServers ?? {}),
+      resolveToolResultCaptureMaxBytes(this.config ?? undefined)
+    );
+  }
+
+  /**
+   * Record the tool calls of a message the tool-call repair promoted from text, which a streamed
+   * run never delivers to {@link recordRunStats}. Fail-soft inside the accumulator.
+   */
+  protected recordPromotedToolCalls(message: unknown): void {
+    accumulatePromotedToolCalls(
+      this.runStatsAcc,
+      message,
       resolveToolResultCaptureMaxBytes(this.config ?? undefined)
     );
   }

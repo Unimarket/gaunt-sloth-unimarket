@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AIMessage, AIMessageChunk, ToolMessage } from '@langchain/core/messages';
 import {
   accumulateMessage,
+  accumulatePromotedToolCalls,
   createRunStatsAccumulator,
   extractRunStats,
   finalizeRunStats,
@@ -149,5 +150,55 @@ describe('core/runStats tool-call arguments (BATCH-52)', () => {
     accumulateMessage(acc, new ToolMessage({ content: 'ok', tool_call_id: 'c1' }));
 
     expect(finalizeRunStats(acc).toolCalls).toEqual([]);
+  });
+
+  describe('a call promoted from model text', () => {
+    // The tool-call repair keeps the id of the text message it replaces.
+    const promoted = (): AIMessage =>
+      new AIMessage({
+        id: 'm1',
+        content: '',
+        tool_calls: [{ id: 'c1', name: 'search', args: { query: 'acme' }, type: 'tool_call' }],
+        usage_metadata: { input_tokens: 5, output_tokens: 7, total_tokens: 12 },
+      });
+
+    it('records the call with its arguments and its name, and no usage', () => {
+      const acc = createRunStatsAccumulator();
+      accumulatePromotedToolCalls(acc, promoted());
+
+      const stats = finalizeRunStats(acc);
+      expect(stats.toolCalls).toEqual([{ name: 'search', id: 'c1', args: '{"query":"acme"}' }]);
+      expect(stats.tools).toEqual(['search']);
+      expect(stats.tokensInput).toBeUndefined();
+    });
+
+    it('records the call once when the same message is folded as a whole message afterwards', () => {
+      const acc = createRunStatsAccumulator();
+      accumulatePromotedToolCalls(acc, promoted());
+      accumulateMessage(acc, promoted());
+      accumulateMessage(acc, result('c1', 'search'));
+
+      expect(finalizeRunStats(acc).toolCalls).toEqual([
+        { name: 'search', id: 'c1', args: '{"query":"acme"}' },
+      ]);
+    });
+
+    it('caps the arguments at the given size', () => {
+      const acc = createRunStatsAccumulator();
+      accumulatePromotedToolCalls(acc, promoted(), 8);
+
+      const [call] = finalizeRunStats(acc).toolCalls ?? [];
+      expect(call.args).toBe('{"query"');
+      expect(call.argsTruncated).toBe(true);
+    });
+
+    it('ignores input that is not a message with tool calls', () => {
+      const acc = createRunStatsAccumulator();
+      for (const input of [null, undefined, 42, {}, { tool_calls: 'nope' }]) {
+        expect(() => accumulatePromotedToolCalls(acc, input)).not.toThrow();
+      }
+
+      expect(finalizeRunStats(acc).toolCalls).toEqual([]);
+    });
   });
 });
