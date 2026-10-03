@@ -341,6 +341,32 @@ export interface ToolResultJsonPathCheck {
 }
 
 /**
+ * One `tool_args` assertion: select recorded tool calls by name `tool` (exact or glob, the matcher
+ * `must_call` uses), parse each call's recorded arguments as JSON, and resolve `path` against them
+ * (the dot/`[index]` path `json_path` uses). Exactly one of the operators is set (enforced in
+ * `evalSuite.js`'s parse):
+ * - `equals` — the resolved value must deep-equal this (any JSON value, incl. `null`);
+ * - `contains` — the resolved value must be a string containing this substring;
+ * - `matches` — the resolved value must be a string this regex matches (compiled at parse time);
+ * - `exists` — the path must resolve;
+ * - `absent` — the path must not resolve.
+ *
+ * The assertion passes when AT LEAST ONE matching call satisfies it. Only calls that produced a
+ * tool result are recorded, so a call without a result cannot satisfy it. Requires the
+ * `gth-agent` target (rejected at parse time otherwise).
+ */
+export interface ToolArgsCheck {
+  /** Tool-name pattern (exact or glob) selecting which tool's call(s) to check. */
+  tool: string;
+  path: string;
+  equals?: unknown;
+  contains?: string;
+  matches?: RegExp;
+  exists?: true;
+  absent?: true;
+}
+
+/**
  * One expectation block (BATCH-12) — the BATCH-10 assertion bundle PLUS an optional `identities`
  * scope. This is the atom the whole eval layer normalizes to: a flat case is sugar for ONE
  * unscoped expectation (applies to every identity), and a matrix case's `expect:` array is a list
@@ -376,6 +402,9 @@ export interface EvalExpectation {
   /** BATCH-21 minimal JSON-path assertions over a matching tool result's payload — see
    * {@link ToolResultJsonPathCheck}. `gth-agent` target only (parse-rejected otherwise). */
   toolResultJsonPath: ToolResultJsonPathCheck[];
+  /** Assertions over the arguments the model passed to a matching tool — see
+   * {@link ToolArgsCheck}. `gth-agent` target only (parse-rejected otherwise). */
+  toolArgs: ToolArgsCheck[];
   /** The judge rubric, when present and non-blank. `undefined` = no judge for this block. */
   judgeRubric?: string;
   /**
