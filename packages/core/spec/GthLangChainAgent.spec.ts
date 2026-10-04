@@ -2044,6 +2044,21 @@ describe('GthLangChainAgent', () => {
         ]);
       });
 
+      it('records the promoted call once when the run stats later fold the same message', async () => {
+        // The non-streamed path: the repair records the call, then the agent's own run-stats fold
+        // sees the promoted message as a whole message. Only the call-id dedupe keeps it to one.
+        const agent = await initWithTool();
+        const repair = getRepairMw();
+
+        const textMsg = new AIMessage({ id: 'lc1', content: '[tool:get_weather]{"city":"Paris"}' });
+        const promoted = repair!.afterModel!({ messages: [textMsg] }).messages[0];
+        (agent as unknown as { recordRunStats(message: unknown): void }).recordRunStats(promoted);
+
+        expect(agent.getRunStats().toolCalls).toEqual([
+          { name: 'get_weather', id: promoted.tool_calls[0].id, args: '{"city":"Paris"}' },
+        ]);
+      });
+
       it('caps the promoted call’s arguments at the configured toolResultCaptureMaxBytes', async () => {
         const agent = await initWithTool({ toolResultCaptureMaxBytes: 8 });
         const repair = getRepairMw();

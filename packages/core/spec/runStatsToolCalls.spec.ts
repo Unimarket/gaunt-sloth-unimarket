@@ -194,7 +194,13 @@ describe('core/runStats tool-call arguments (BATCH-52)', () => {
 
     it('ignores input that is not a message with tool calls', () => {
       const acc = createRunStatsAccumulator();
-      for (const input of [null, undefined, 42, {}, { tool_calls: 'nope' }]) {
+      // The throwing getter is the one input only the try/catch can absorb.
+      const hostile = {
+        get tool_calls(): unknown {
+          throw new Error('hostile message');
+        },
+      };
+      for (const input of [null, undefined, 42, {}, { tool_calls: 'nope' }, hostile]) {
         expect(() => accumulatePromotedToolCalls(acc, input)).not.toThrow();
       }
 
