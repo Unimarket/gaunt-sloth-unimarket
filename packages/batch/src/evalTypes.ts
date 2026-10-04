@@ -342,11 +342,21 @@ export interface ToolResultJsonPathCheck {
 
 /**
  * One `tool_call_json_path` assertion (BATCH-52): the {@link ToolResultJsonPathCheck} shape, read
- * against the ARGUMENTS a matching tool was called with instead of what it returned. Passes when
- * at least one matching call satisfies it. Requires `evalToolCallArgs` in the run-level config and
- * a `gth-agent` or `ag-ui` target.
+ * against the ARGUMENTS a matching tool was called with instead of what it returned. Requires
+ * `evalToolCallArgs` in the run-level config and a `gth-agent` or `ag-ui` target.
+ *
+ * At most one of `equals`/`contains`/`matches` is set (enforced in `evalSuite.js`'s parse). By
+ * default the entry passes when at least one matching call satisfies it.
  */
-export type ToolCallJsonPathCheck = ToolResultJsonPathCheck;
+export interface ToolCallJsonPathCheck extends ToolResultJsonPathCheck {
+  /** The resolved value must be a string this expression matches. */
+  matches?: RegExp;
+  /** `false` = the path must NOT resolve in the call's arguments; never combined with an operator.
+   * Absent = the path must resolve. */
+  present?: false;
+  /** `true` = every call to a matching tool must satisfy the entry, not just one. */
+  allCalls?: true;
+}
 
 /**
  * One expectation block (BATCH-12) — the BATCH-10 assertion bundle PLUS an optional `identities`

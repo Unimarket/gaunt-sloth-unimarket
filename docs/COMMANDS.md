@@ -560,7 +560,7 @@ These grade the agent's answer (and its tool trace). Use them at case level, ins
 | `json_path` | list | The answer parses as JSON and every entry holds. Each entry is `{ path, equals }` or `{ path, contains }` (exactly one), where `path` is a minimal dotted/indexed path (`$.items[0].scope`, `data.status`). |
 | `must_error` | string[] | For **each** pattern, at least one called tool matching it **returned an error** (the tool result's real error status, not text sniffing). Globs supported, same matcher as `must_call`. |
 | `tool_result_json_path` | list | Each entry is `{ tool, path }` plus optionally `equals` **or** `contains`. At least one result from a tool matching `tool` (glob) parses as JSON and `path` resolves in it (and matches `equals`/`contains` when set; neither = existence check). A non-JSON payload fails the entry. For a failed MCP call the payload graded is the server's own error body — see [Tool-result assertions](#tool-result-assertions). |
-| `tool_call_json_path` | list | Same entry shape as `tool_result_json_path`, read against the **arguments** a matching tool was called with: at least one call to a tool matching `tool` (glob) has arguments where `path` resolves (and matches `equals`/`contains` when set). Needs [`evalToolCallArgs`](configuration/output.md#recorded-tool-call-arguments-evaltoolcallargs) — see [Tool-call argument assertions](#tool-call-argument-assertions). |
+| `tool_call_json_path` | list | Same entry shape as `tool_result_json_path`, read against the **arguments** a matching tool was called with: at least one call to a tool matching `tool` (glob) has arguments where `path` resolves (and matches `equals`/`contains`/`matches` when set). Also takes `present` and `all_calls`. Needs [`evalToolCallArgs`](configuration/output.md#recorded-tool-call-arguments-evaltoolcallargs) — see [Tool-call argument assertions](#tool-call-argument-assertions). |
 | `expect_label` | string | The classification the SUT produced equals this. The value must be one the suite's `classification.labels` declares. Requires a `classification` block. |
 | `expect_action` | string | The **action** the SUT produced equals this. Requires `classification.actions` **and** `classification.action_from`. |
 | `expect_rated` | `true` | A model actually rendered a verdict for this round — `model.label` is present. Asserts nothing about *which* verdict. `rater` target only, and not on a `model_free` case; see [Asserting that the rater answered](#asserting-that-the-rater-answered). |
@@ -620,6 +620,30 @@ gth -i shop-eval eval evals/orders.yaml
 ```
 
 Each entry passes when **at least one** call to a matching tool satisfies it, so a tool the agent called three times passes if any of the three calls sent the value. A failing entry quotes what it found: `tool_call_json_path "filters.status" (tool "mcp__shop__search_orders"): is "any", expected "open"`.
+
+An entry takes `tool` and `path`, plus these optional keys:
+
+| Key | Meaning |
+|---|---|
+| `equals` | The value at `path` deep-equals this. |
+| `contains` | The value at `path` is a string containing this substring. |
+| `matches` | The value at `path` is a string that this regular expression matches. Case-sensitive and unanchored; the pattern owns its flags and anchors. An invalid pattern is rejected before anything runs (exit `2`), with an error naming the entry. |
+| `present` | Boolean, default `true`. `false` requires that `path` does **not** resolve in the call's arguments. It cannot be combined with `equals`, `contains` or `matches`; the suite is rejected before anything runs (exit `2`). `present: true` with an operator is allowed and changes nothing. |
+| `all_calls` | Boolean, default `false`. `true` requires **every** call to a matching tool to satisfy the entry, not just one. An entry still fails when no call matches `tool`. |
+
+At most one of `equals`, `contains` and `matches` may be set. `contains` and `matches` fail on a value that is not a string.
+
+To assert that the agent never sent an argument, combine `present: false` with `all_calls: true`:
+
+```yaml
+- id: lists-all-orders
+  prompt: "List every laptop order."
+  tool_call_json_path:
+    - { tool: "mcp__shop__search_orders", path: "filters.status", present: false, all_calls: true }
+    - { tool: "mcp__shop__search_orders", path: "query", matches: "^laptop" }
+```
+
+Without `all_calls`, `present: false` passes if **at least one** call omits the argument, even when another call sent it.
 
 With the setting on, every case result in `<case>.json` (and each turn of a multi-turn case) gains a `toolCalls` list — one entry per call, in the order the model made them, with the arguments as the JSON text the model sent:
 

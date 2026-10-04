@@ -1259,8 +1259,74 @@ cases:
       - { tool: "t", path: "a.b", equals: "x", contains: "y" }
 `)
       ).toThrow(
-        /tool_call_json_path entry for "a\.b" must set at most one of "equals" or "contains"/
+        /tool_call_json_path entry for "a\.b" must set at most one of "equals", "contains" or "matches"/
       );
+    });
+
+    it('parses matches into a compiled RegExp, present: false and all_calls: true', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "search", path: "query", matches: "^lap.*s$" }
+      - { tool: "search", path: "filters.status", present: false, all_calls: true }
+      - { tool: "search", path: "query", present: true, equals: "x" }
+`);
+      expect(suite.cases[0].turns[0].expectations[0].toolCallJsonPath).toEqual([
+        { tool: 'search', path: 'query', matches: /^lap.*s$/ },
+        { tool: 'search', path: 'filters.status', present: false, allCalls: true },
+        { tool: 'search', path: 'query', equals: 'x' },
+      ]);
+    });
+
+    it('rejects an invalid matches pattern, naming the entry', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "t", path: "a.b", matches: "(" }
+`)
+      ).toThrow(/tool_call_json_path entry for "a\.b" has an invalid matches pattern "\(": /);
+    });
+
+    it.each(['equals: "x"', 'contains: "x"', 'matches: "x"'])(
+      'rejects present: false combined with %s',
+      async (operator) => {
+        const { parseEvalSuite } = await import('#src/evalSuite.js');
+        expect(() =>
+          parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "t", path: "a.b", present: false, ${operator} }
+`)
+        ).toThrow(
+          /tool_call_json_path entry for "a\.b" sets present: false, which cannot be combined with "equals", "contains" or "matches"/
+        );
+      }
+    );
+
+    it('rejects an entry setting more than one of equals, contains and matches', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    tool_call_json_path:
+      - { tool: "t", path: "a.b", contains: "y", matches: "z" }
+`)
+      ).toThrow(/tool_call_json_path entry for "a\.b" must set at most one of/);
     });
 
     it('rejects an entry missing its tool pattern', async () => {

@@ -3,7 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { toolNameMatchesPattern } from '@gaunt-sloth/core/utils/toolMatching.js';
 
 import { resolveJsonPath } from '#src/deterministicChecks.js';
-import type { EvalExpectation, ToolResultJsonPathCheck } from '#src/evalTypes.js';
+import type {
+  EvalExpectation,
+  ToolCallJsonPathCheck,
+  ToolResultJsonPathCheck,
+} from '#src/evalTypes.js';
 import type { ToolResultRecord } from '#src/types.js';
 
 /**
@@ -145,13 +149,15 @@ function evaluateResultAgainstCheck(
 }
 
 /**
- * Resolve `check.path` against an already-parsed payload and apply its `equals` / `contains` (or
- * neither: existence). `undefined` = satisfied, else the reason. Shared by the tool-RESULT check
- * above and BATCH-52's tool-call ARGUMENT check, which differ only in which payload they parse.
+ * Resolve `check.path` against an already-parsed payload and apply its `equals` / `contains` /
+ * `matches` (or neither: existence). `undefined` = satisfied, else the reason. Shared by the
+ * tool-RESULT check above and BATCH-52's tool-call ARGUMENT check, which differ only in which
+ * payload they parse.
  */
 export function gradeJsonPathValue(
   root: unknown,
-  check: Pick<ToolResultJsonPathCheck, 'path' | 'equals' | 'contains'>
+  check: Pick<ToolResultJsonPathCheck, 'path' | 'equals' | 'contains'> &
+    Pick<ToolCallJsonPathCheck, 'matches'>
 ): string | undefined {
   const { found, value } = resolveJsonPath(root, check.path);
   if (!found) {
@@ -164,6 +170,16 @@ export function gradeJsonPathValue(
     }
     if (!value.includes(check.contains)) {
       return `does not contain "${check.contains}"`;
+    }
+    return undefined;
+  }
+
+  if (check.matches !== undefined) {
+    if (typeof value !== 'string') {
+      return `is ${JSON.stringify(value)} (matches check requires a string)`;
+    }
+    if (!check.matches.test(value)) {
+      return `does not match ${check.matches}`;
     }
     return undefined;
   }
