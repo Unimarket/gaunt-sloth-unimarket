@@ -1370,4 +1370,299 @@ cases:
       ).toThrow(/case "searched" uses `tool_call_json_path`.*A2A does not expose them/s);
     });
   });
+
+  describe('unknown keys', () => {
+    const BASE_CASE = '  - id: c1\n    prompt: "p"\n    must_contain: ["x"]\n';
+
+    // Each entry is a suite with one misspelt key, the location the message must name and the key.
+    const MISSPELT: Array<[string, string, RegExp, string]> = [
+      [
+        'the top level',
+        'target: { type: gth-agent }\njudge_profil: x\ncases:\n' + BASE_CASE,
+        /^\(root\): /,
+        'judge_profil',
+      ],
+      ['target', 'target: { type: gth-agent, urll: x }\ncases:\n' + BASE_CASE, /^target: /, 'urll'],
+      [
+        'defaults',
+        'target: { type: gth-agent }\ndefaults: { pass_threshhold: 6 }\ncases:\n' + BASE_CASE,
+        /^defaults: /,
+        'pass_threshhold',
+      ],
+      [
+        'a flat case',
+        'target: { type: gth-agent }\ncases:\n' + BASE_CASE + '    prompts: "q"\n',
+        /^case "c1" \(index 0\): /,
+        'prompts',
+      ],
+      [
+        'a flat case assertion',
+        'target: { type: gth-agent }\ncases:\n' + BASE_CASE + '    must_contian: ["y"]\n',
+        /^case "c1" \(index 0\): /,
+        'must_contian',
+      ],
+      [
+        'an expect block',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    prompt: "p"\n    expect:\n      - must_contian: ["x"]\n',
+        /^case "c1" \(index 0\) at expect\.0: /,
+        'must_contian',
+      ],
+      [
+        'a turn',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    turns:\n      - usr: "p"\n        must_contain: ["x"]\n',
+        /^case "c1" \(index 0\) at turns\.0: /,
+        'usr',
+      ],
+      [
+        'an expect block inside a turn',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    turns:\n      - user: "p"\n        expect:\n          - must_contian: ["x"]\n',
+        /^case "c1" \(index 0\) at turns\.0\.expect\.0: /,
+        'must_contian',
+      ],
+      [
+        'a json_path entry',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    prompt: "p"\n    json_path:\n      - { path: "a", contain: "x" }\n',
+        /^case "c1" \(index 0\) at json_path\.0: /,
+        'contain',
+      ],
+      [
+        'a tool_result_json_path entry',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    prompt: "p"\n    tool_result_json_path:\n      - { tool: "t", path: "a", presnt: true }\n',
+        /^case "c1" \(index 0\) at tool_result_json_path\.0: /,
+        'presnt',
+      ],
+      [
+        'a tool_call_json_path entry',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    prompt: "p"\n    tool_call_json_path:\n      - { tool: "t", path: "a", presnt: false }\n',
+        /^case "c1" \(index 0\) at tool_call_json_path\.0: /,
+        'presnt',
+      ],
+      [
+        'a tool_call_json_path entry inside an expect block',
+        'target: { type: gth-agent }\ncases:\n  - id: c1\n    prompt: "p"\n    expect:\n      - tool_call_json_path:\n          - { tool: "t", path: "a", all_call: true }\n',
+        /^case "c1" \(index 0\) at expect\.0\.tool_call_json_path\.0: /,
+        'all_call',
+      ],
+      [
+        'classification',
+        'target: { type: gth-agent }\nclassification: { labels: [a], action_form: answer }\ncases:\n' +
+          BASE_CASE,
+        /^classification: /,
+        'action_form',
+      ],
+      [
+        'a classification extractor that also has a valid key',
+        'target: { type: gth-agent }\nclassification: { labels: [a], action_from: { json_path: "$.x", path: "y" } }\ncases:\n' +
+          BASE_CASE,
+        /^classification\.action_from: /,
+        'path',
+      ],
+      [
+        'a classification extractor',
+        'target: { type: gth-agent }\nclassification: { labels: [a], label_from: { jsonpath: "$.x" } }\ncases:\n' +
+          BASE_CASE,
+        /^classification\.label_from: /,
+        'jsonpath',
+      ],
+      [
+        'a metric',
+        'target: { type: gth-agent }\nclassification: { labels: [a] }\nmetrics:\n  - { name: m, where: "x", maxx: 0.1 }\ncases:\n' +
+          BASE_CASE,
+        /^metrics\.0: /,
+        'maxx',
+      ],
+      [
+        'a sweep',
+        'target: { type: gth-agent }\nsweep:\n  axis: []\n  axes:\n    - { name: a, values: [{ name: v, model: m }] }\ncases:\n' +
+          BASE_CASE,
+        /^sweep: /,
+        'axis',
+      ],
+      [
+        'a sweep axis',
+        'target: { type: gth-agent }\nsweep:\n  axes:\n    - { name: a, value: [{ name: v, model: m }], values: [{ name: v, model: m }] }\ncases:\n' +
+          BASE_CASE,
+        /^sweep\.axes\.0: /,
+        'value',
+      ],
+      [
+        'a sweep value',
+        'target: { type: gth-agent }\nsweep:\n  axes:\n    - { name: a, values: [{ name: v, modell: m }] }\ncases:\n' +
+          BASE_CASE,
+        /^sweep\.axes\.0\.values\.0: /,
+        'modell',
+      ],
+      [
+        'a sweep value notes block',
+        'target: { type: gth-agent }\nsweep:\n  axes:\n    - { name: a, values: [{ name: v, notes: { omit: [], ommit: [] } }] }\ncases:\n' +
+          BASE_CASE,
+        /^sweep\.axes\.0\.values\.0\.notes: /,
+        'ommit',
+      ],
+      [
+        'tool_coverage',
+        'target: { type: gth-agent }\ntool_coverage: { waives: ["x"] }\ncases:\n' + BASE_CASE,
+        /^tool_coverage: /,
+        'waives',
+      ],
+    ];
+
+    it.each(MISSPELT)(
+      'rejects an unknown key on %s, naming the key and where it is',
+      async (_where, yaml, location, key) => {
+        const { parseEvalSuite } = await import('#src/evalSuite.js');
+        let message = '';
+        try {
+          parseEvalSuite(yaml, 'suite.yaml');
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        const prefix = 'Invalid eval suite (suite.yaml): ';
+        expect(message.startsWith(prefix)).toBe(true);
+        const detail = message.slice(prefix.length);
+        expect(detail).toMatch(location);
+        expect(detail).toContain(`unknown key "${key}"; valid keys are "`);
+      }
+    );
+
+    it('lists every valid key of the object, and only those', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      expect(() =>
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    json_path:
+      - { path: "a", contain: "x" }
+`)
+      ).toThrow(
+        'Invalid eval suite: case "c1" (index 0) at json_path.0: unknown key "contain"; valid keys ' +
+          'are "path", "equals", "contains"'
+      );
+    });
+
+    it('lists the keys an expect block adds to the shared assertion keys', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      let message = '';
+      try {
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    expect:
+      - identity: [a]
+        must_contain: ["x"]
+`);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('unknown key "identity"');
+      expect(message).toContain('"identities"');
+      expect(message).toContain('"must_contain"');
+    });
+
+    it('does not offer a case-level key that only an expect block takes', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      let message = '';
+      try {
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: c1
+    prompt: "p"
+    identities: [a]
+    must_contain: ["x"]
+`);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain('unknown key "identities"');
+      expect(message).not.toMatch(/valid keys are .*"identities"/);
+    });
+
+    it('names every unknown key on one object, and every object that has one', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      let message = '';
+      try {
+        parseEvalSuite(`
+target: { type: gth-agent }
+cases:
+  - id: first
+    prompt: "p"
+    must_contian: ["x"]
+    must_not_contian: ["y"]
+  - id: second
+    prompt: "p"
+    must_contain: ["x"]
+    judje: "z"
+`);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(
+        'case "first" (index 0): unknown keys "must_contian", "must_not_contian"; valid keys are '
+      );
+      expect(message).toContain('case "second" (index 1): unknown key "judje"; valid keys are ');
+    });
+
+    it('still accepts any key inside a sweep value config, which is free-form data', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent }
+sweep:
+  axes:
+    - name: a
+      values:
+        - { name: v, config: { anything: { goes: [1, 2] } } }
+cases:
+  - id: c1
+    prompt: "p"
+    must_contain: ["x"]
+`);
+      expect(suite.sweep?.axes[0].values[0].name).toBe('v');
+    });
+
+    it('still accepts every key of every object together', async () => {
+      const { parseEvalSuite } = await import('#src/evalSuite.js');
+      const suite = parseEvalSuite(`
+target: { type: gth-agent, profile: default }
+judge_profile: judge
+identities: [admin]
+defaults: { pass_threshold: 5 }
+classification:
+  labels: [a, b]
+  actions: [x]
+  label_from: { json_path: "$.label" }
+  action_from: answer
+metrics:
+  - { name: m, description: d, where: "expected.label == a", over: "expected.label != b", max: 0.5, min: 0.1, gate: report }
+tool_coverage: { waive: ["a"], require: ["b"], min: 50 }
+cases:
+  - id: c1
+    tags: [t]
+    pass_threshold: 4
+    prompt: "p"
+    expect:
+      - identities: [admin]
+        must_contain: ["x"]
+        must_not_contain: ["y"]
+        should_contain_any: ["z"]
+        must_call: ["t"]
+        must_not_call: ["u"]
+        must_match: ["a"]
+        must_not_match: ["b"]
+        json_path: [{ path: "a", equals: 1 }, { path: "b", contains: "c" }]
+        must_error: ["t"]
+        tool_result_json_path: [{ tool: "t", path: "a", equals: 1 }]
+        tool_call_json_path:
+          - { tool: "t", path: "a", matches: "x", present: true, all_calls: true }
+        expect_label: a
+        expect_action: x
+        judge: "j"
+`);
+      expect(suite.cases[0].turns[0].expectations[0].identities).toEqual(['admin']);
+    });
+  });
 });

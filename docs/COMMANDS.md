@@ -544,6 +544,8 @@ Each entry in `cases` has an `id` (unique; letters, digits, `-`, `_`, `.` only â
 
 A per-case `pass_threshold:` (0â€“10) overrides `defaults.pass_threshold` for that case.
 
+A key the suite format does not define is rejected wherever it appears (exit `2`): at the top level, in `target`, in a case, a turn or an `expect:` block, in any assertion entry, and in `classification`, `metrics`, `sweep` and `tool_coverage`. The error names the key, says where it is (a key inside a case is located by the case id) and lists the keys that object accepts, so a misspelt `contain:` fails the load instead of weakening a check. A sweep value's `config` is free-form and takes any key.
+
 ### Assertion keys
 
 These grade the agent's answer (and its tool trace). Use them at case level, inside an `expect:` block, or inside a turn; every block must declare at least one assertion **or** a `judge:` rubric.
@@ -1069,9 +1071,11 @@ If that is what you are seeing, raise the budget rather than reading the column.
 ```yaml
 target: { type: rater, rung: auto }
 sweep:
-  rater:
-    - { config: { approvals: { mode: auto, rater: haiku } } }
-    - { config: { approvals: { mode: auto, rater: local, raterTimeoutMs: 120000 } } }
+  axes:
+    - name: rater
+      values:
+        - { name: haiku, config: { approvals: { mode: auto, rater: haiku } } }
+        - { name: local, config: { approvals: { mode: auto, rater: local, raterTimeoutMs: 120000 } } }
 ```
 
 **Sweeping `model:` moves the judge too.** By default `judge:` rubrics are graded by the SUT's own model, so a model axis changes the grader along with the thing graded and the comparison's `pass rate` row is no longer comparable across cells. Set `judge_profile:` (or `--judge`) to pin the grader to one model whenever you sweep `model:` on a suite that uses rubrics.
