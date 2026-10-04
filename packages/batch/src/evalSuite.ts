@@ -38,6 +38,12 @@ import type {
 import { parseMetricPredicate } from '#src/metrics.js';
 import type { ToolCoverageSpec } from '#src/toolCoverage.js';
 
+/** Separates the unknown-key part of a message from the list of keys the object accepts. */
+const VALID_KEYS_INTRO = '; valid keys are ';
+
+/** The most issues a parse error prints; the rest are counted. */
+const MAX_REPORTED_ISSUES = 10;
+
 /**
  * An object schema for a suite file that rejects any key its shape does not declare, with a message
  * naming the key and listing the keys the object accepts. A dropped key is never harmless here: a
@@ -51,8 +57,8 @@ function suiteObject<T extends z.ZodRawShape>(shape: T) {
       const accepted = issue.inst instanceof z.ZodObject ? Object.keys(issue.inst.shape) : [];
       const quote = (keys: readonly string[]): string => keys.map((key) => `"${key}"`).join(', ');
       return (
-        `unknown ${issue.keys.length === 1 ? 'key' : 'keys'} ${quote(issue.keys)}; ` +
-        `valid keys are ${quote(accepted)}`
+        `unknown ${issue.keys.length === 1 ? 'key' : 'keys'} ${quote(issue.keys)}` +
+        `${VALID_KEYS_INTRO}${quote(accepted)}`
       );
     },
   });
@@ -207,6 +213,8 @@ const RawCaseSchema = RawAssertionsSchema.extend({
   // `prompt` is validated in code (not `.min(1)` here) so a `turns:` case gets the clear
   // prompt-XOR-turns error instead of a generic "prompt required" schema error.
   prompt: z.string().optional(),
+  // Documentation only; never read by grading.
+  description: z.string().optional(),
   // BATCH-12: a matrix case's identity-scoped expectation blocks. Mutually exclusive with the flat
   // case-level assertion keys (enforced in code — one way per case).
   expect: z.array(RawExpectationSchema).optional(),
@@ -342,6 +350,8 @@ const RawSuiteSchema = suiteObject({
   // "none" (judge = SUT model). Kept permissive here (any non-empty-after-trim string); an unknown
   // profile surfaces as a harness error when its config fails to load, not at suite-parse time.
   judge_profile: z.string().optional(),
+  // Documentation only; never read by grading.
+  description: z.string().optional(),
   // BATCH-12: the identity matrix. A list of plain identity-profile names; every case runs once per
   // name. Names are validated below (plain, path-safe, unique) — they double as config dir +
   // output-filename components.
@@ -407,7 +417,7 @@ type RawAssertions = z.infer<typeof RawAssertionsSchema>;
  * - Malformed YAML.
  * - A suite shape that doesn't match `RawSuiteSchema` (missing/wrong-typed fields).
  * - A key the schema does not declare, at any level of the suite (other than inside a sweep value's
- *   free-form `config`), so a misspelt key never silently weakens a check.
+ *   The message lists each accepted-key set once and reports at most 10 issues.
  * - `target.type` other than `"gth-agent"`, `"adk-agent"`, `"ag-ui"`, or `"rater"` — other pluggable
  *   CLI/HTTP targets are out of scope.
  * - `target.profile` set to anything other than `"default"`/absent — a single suite-wide profile
@@ -490,12 +500,26 @@ function describeUnknownKeyLocation(path: readonly PropertyKey[], raw: unknown):
   return rest.length > 0 ? `${evalCase} at ${rest.join('.')}` : evalCase;
 }
 
+/**
+ * Replaces the "valid keys are ..." list of an unknown-key message with `(valid keys as above)` when
+ * the same list has already been printed, so an error over many cases lists each accepted-key set
+ * once. `printed` holds the lists printed so far and is updated.
+ */
+function abbreviateRepeatedKeyList(message: string, printed: Set<string>): string {
+  const at = message.indexOf(VALID_KEYS_INTRO);
+  if (at < 0) return message;
+  const keyList = message.slice(at + VALID_KEYS_INTRO.length);
+  if (printed.has(keyList)) return `${message.slice(0, at)}; (valid keys as above)`;
+  printed.add(keyList);
+  return message;
+}
+
 export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite {
   const suffix = sourcePath ? ` (${sourcePath})` : '';
 
   let raw: unknown;
   try {
-    raw = parseYaml(yamlText);
+    raw = parseYaml(yamlText, { merge: true });
   } catch (error) {
     throw new Error(
       `Failed to parse eval suite YAML${suffix}: ` +
@@ -505,16 +529,17 @@ export function parseEvalSuite(yamlText: string, sourcePath?: string): EvalSuite
 
   const parsed = RawSuiteSchema.safeParse(raw);
   if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((issue) => {
-        const where =
-          issue.code === 'unrecognized_keys'
-            ? describeUnknownKeyLocation(issue.path, raw)
-            : issue.path.join('.');
-        return `${where || '(root)'}: ${issue.message}`;
-      })
-      .join('; ');
-    throw new Error(`Invalid eval suite${suffix}: ${issues}`);
+    const printedKeyLists = new Set<string>();
+    const issues = parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
+      const where =
+        issue.code === 'unrecognized_keys'
+          ? describeUnknownKeyLocation(issue.path, raw)
+          : issue.path.join('.');
+      return `${where || '(root)'}: ${abbreviateRepeatedKeyList(issue.message, printedKeyLists)}`;
+    });
+    const omitted = parsed.error.issues.length - issues.length;
+    if (omitted > 0) issues.push(`... and ${omitted} more`);
+    throw new Error(`Invalid eval suite${suffix}: ${issues.join('; ')}`);
   }
   const data = parsed.data;
 
